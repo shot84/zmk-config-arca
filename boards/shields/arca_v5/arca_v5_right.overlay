@@ -1,0 +1,76 @@
+// Arca rev.2（v5）右手（peripheral）/ 2026-10-28
+// 正 = ark_body_net_v5.XIAO_ASSIGN["R"]・照合 = chat-files/ark_fw_v5_check.py
+//   線 1..6 = D0 D1 D2 D3 D4 NFC2(P0.09) ／ INTR = D7
+//   センサ: SCLK = D8(P1.13)・SDIO = D6(P1.11)・CS = D5(P0.05)・MOTION = NFC1(P0.10)
+//   OLED: D9/D10（arca_v5.dtsi）
+#include "arca_v5.dtsi"
+#include <dt-bindings/zmk/input_transform.h>
+#include <zephyr/dt-bindings/input/input-event-codes.h>
+#include <input/processors/report_rate_limit.dtsi>
+
+&default_transform {
+    col-offset = <6>;
+};
+
+&kscan0 {
+    gpios
+        = <&xiao_d 0 GPIO_ACTIVE_HIGH>     // 線 1
+        , <&xiao_d 1 GPIO_ACTIVE_HIGH>     // 線 2
+        , <&xiao_d 2 GPIO_ACTIVE_HIGH>     // 線 3
+        , <&xiao_d 3 GPIO_ACTIVE_HIGH>     // 線 4
+        , <&xiao_d 4 GPIO_ACTIVE_HIGH>     // 線 5
+        , <&gpio0 9 GPIO_ACTIVE_HIGH>      // 線 6（5way のコモン）= NFC2（★10-31: 足形の NFC1/NFC2 は Seeed と逆＝P0.09）
+        ;
+    interrupt-gpios = <&xiao_d 7 GPIO_ACTIVE_HIGH>;   // INTR
+};
+
+&pinctrl {
+    spi0_default: spi0_default {
+        group1 {
+            psels = <NRF_PSEL(SPIM_SCK, 1, 13)>,
+                    <NRF_PSEL(SPIM_MOSI, 1, 11)>,
+                    <NRF_PSEL(SPIM_MISO, 1, 11)>;
+        };
+    };
+
+    spi0_sleep: spi0_sleep {
+        group1 {
+            psels = <NRF_PSEL(SPIM_SCK, 1, 13)>,
+                    <NRF_PSEL(SPIM_MOSI, 1, 11)>,
+                    <NRF_PSEL(SPIM_MISO, 1, 11)>;
+            low-power-enable;
+        };
+    };
+};
+
+&spi0 {
+    status = "okay";
+    compatible = "nordic,nrf-spim";
+    pinctrl-0 = <&spi0_default>;
+    pinctrl-1 = <&spi0_sleep>;
+    pinctrl-names = "default", "sleep";
+    cs-gpios = <&xiao_d 5 GPIO_ACTIVE_LOW>;          // CS = D5(P0.05)
+
+    // L と同じセンサ基板を 180° 回して付ける（台帳 10-19）＝R の軸は L の X/Y 両反転（arca_v5_right.conf）
+    trackball: trackball@0 {
+        status = "okay";
+        compatible = "cormoran,pmw3610";
+        reg = <0>;
+        spi-max-frequency = <2000000>;
+        irq-gpios = <&gpio0 10 (GPIO_ACTIVE_LOW | GPIO_PULL_UP)>;  // MOTION = NFC1（★10-31: P0.10）
+        cpi = <800>;
+        force-awake;                                                // 11-02 MeKaBu2 と同じ（ユーザー「進めておいて」）・ZMK が idle になるとドライバが外す（on_activity_state）
+        evt-type = <INPUT_EV_REL>;
+        x-input-code = <INPUT_REL_X>;
+        y-input-code = <INPUT_REL_Y>;
+        settings-id = "right";
+    };
+};
+
+// 自分（peripheral）のトラボを central へ流す
+&tb_split {
+    device = <&trackball>;
+    // rev3 09-29: 無線で TB が重くなる件（左の送信キューが埋まって古い動きを遅れて送る）→ 8 ms 以内の動きを
+    //   1 回にまとめる（量は失わない）。rev3 の R の最終値
+    // 11-09: R→L の 8 ms のまとめ（report-rate-limit）は外した＝細かい動きの端数が遅れる・消える
+};

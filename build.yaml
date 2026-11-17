@@ -1,0 +1,12 @@
+# GitHub Actions でビルドする組み合わせ（.github/workflows/build.yml が読む）
+include:
+  - board: xiao_ble//zmk
+    shield: arca_v5_left
+    snippet: studio-rpc-usb-uart
+    artifact-name: arca_v5_left
+  - board: xiao_ble//zmk
+    shield: arca_v5_right
+    artifact-name: arca_v5_right
+  - board: xiao_ble//zmk
+    shield: settings_reset
+    artifact-name: settings_reset

@@ -1,0 +1,78 @@
+# Arca rev.2 firmware build.
+# Same steps as ZMK's reusable user-config workflow, plus one extra step:
+# apply patches/zephyr-arca.patch to Zephyr after `west update`.
+name: Build
+
+on:
+  push:
+  pull_request:
+  workflow_dispatch:
+
+jobs:
+  matrix:
+    runs-on: ubuntu-latest
+    outputs:
+      include: ${{ steps.m.outputs.include }}
+    steps:
+      - uses: actions/checkout@v4
+      - id: m
+        run: echo "include=$(yq -oj -I0 '.include' build.yaml)" >> "$GITHUB_OUTPUT"
+
+  build:
+    needs: matrix
+    runs-on: ubuntu-latest
+    container:
+      image: zmkfirmware/zmk-build-arm:stable
+    strategy:
+      fail-fast: false
+      matrix:
+        include: ${{ fromJson(needs.matrix.outputs.include) }}
+    name: ${{ matrix.artifact-name }}
+    steps:
+      - uses: actions/checkout@v4
+
+      - name: Prepare workspace
+        run: |
+          echo "ws=/tmp/zmk-ws" >> "$GITHUB_ENV"
+          mkdir -p /tmp/zmk-ws/config
+          cp -R config/* /tmp/zmk-ws/config/
+
+      - name: West init / update
+        working-directory: /tmp/zmk-ws
+        run: |
+          west init -l config
+          west update --fetch-opt=--filter=tree:0
+          west zephyr-export
+
+      - name: Apply Zephyr patch
+        working-directory: /tmp/zmk-ws/zephyr
+        run: git apply --verbose "$GITHUB_WORKSPACE/patches/zephyr-arca.patch"
+
+      - name: Build
+        working-directory: /tmp/zmk-ws
+        env:
+          BOARD: ${{ matrix.board }}
+          SHIELD: ${{ matrix.shield }}
+          SNIPPET: ${{ matrix.snippet }}
+        run: |
+          W="$GITHUB_WORKSPACE"
+          MODS="$W;$W/modules/arca-led;$W/modules/arca-oled;$W/modules/arca-qscroll"
+          set -x
+          west build -s zmk/app -d build -b "$BOARD" ${SNIPPET:+-S "$SNIPPET"} -- \
+            -DSHIELD="$SHIELD" -DZMK_CONFIG=/tmp/zmk-ws/config -DZMK_EXTRA_MODULES="$MODS"
+          mkdir -p "$W/out"
+          cp build/zephyr/zmk.uf2 "$W/out/${{ matrix.artifact-name }}.uf2"
+
+      - uses: actions/upload-artifact@v4
+        with:
+          name: ${{ matrix.artifact-name }}
+          path: out/${{ matrix.artifact-name }}.uf2
+
+  merge:
+    needs: build
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/upload-artifact/merge@v4
+        with:
+          name: firmware
+          delete-merged: true

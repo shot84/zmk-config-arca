@@ -1,0 +1,230 @@
+// Arca rev.2（v5）キーマップ / 2026-10-28
+// ★rev3 の ark.keymap（65561e0・keymap editor の編集を取り込んだ版）を**そのまま写した**もの。
+//   位置番号（キー順）は rev3 と同じ（指 4 行[L5+R5]→L ナビ 5→R ナビ 5）＝arca_v5.dtsi の transform がそう並べる。
+//   違い: エンコーダが無い＝sensor-bindings を全レイヤから外しただけ。
+//   ★実機の配列は DYA で編集したものが NVS に入る（このファイルは初期値）。rev3 の DYA で変えた分は
+//     ここには入っていない＝v5 に焼いた後で DYA で同じに直すか、先にこのファイルへ写す。
+// 経緯（MKB2 からの 5 列移植・hold-tap・combos の位置番号）は ark.keymap の冒頭が正。
+// 5way: L/R とも実際に倒す向きで UP LEFT CENTER RIGHT DOWN（arca_v5.dtsi）。中央＝ENTER
+
+#include <behaviors.dtsi>
+#include <dt-bindings/zmk/bt.h>
+#include <dt-bindings/zmk/keys.h>
+#include <dt-bindings/zmk/pointing.h>
+#include <behaviors/quick_scroll.dtsi>   // firmware/zmk-module-arca-qscroll（11-04）
+
+// R の 5way（11-04 ユーザー「これ右の5wayに入れたい」・BParound30 さんの quick-scroll）
+//   上下: 短押し＝PgUp/PgDn（QS_DELAY より前に離した瞬間・長押しでは送らない）・長押し＝QS_DELAY の後から通常の速さでスクロール・2 回早押し＋ホールド＝速く
+//   左右: 短押し＝Home/End・長押し＝Ctrl+←/→（Mission Control の左右・1 回だけ送る）
+#define QS_SPEED 12                     // 長押しのスクロール（ホイールの刻み/秒・ZMK の &msc の既定は 10）・11-04「スクロールの速度を少し落としたい」で 20→15・11-09「右5wayのスクロールの速度を少し落としたい」で 15→12
+                                        // ★符号: 上（PgUp）が −・下（PgDn）が ＋（11-04 ユーザー「上下逆だわ」＝ZMK の SCRL_UP の向きでは逆だった）
+
+&qmsc {
+    delay-ms = <250>;                   // ここまでに離せば PgUp/PgDn だけ（スクロールは混ざらない）
+    double-tap-ms = <200>;
+    fast-multiplier = <4>;
+    bounce-ms = <0>;                    // 反対向きを捨てる仕組み（11-04 に足した）は切る＝ログ版で反対の接点は 1 回も入っていなかった
+};
+
+#define DEF 0
+#define FUNC 1
+#define NUM 2
+#define SCROLL 3
+#define BT 4
+// 11-09 iPad（BT2）の Jump Desktop 越しに MBP を使う間のレイヤ（ユーザー「いいよ」）。BT レイヤの K の位置で入/切。
+//   Jump 越しの MBP は打鍵を内蔵（JIS）として読む（推測・記号が全部ずれる）＝記号だけ JIS の並びで送る。　→ 11-11 外れ（US で読んでいた）
+//   LANG1/2 は iPad が受けてしまう。11-12: かな＝⌃.（MBP のシステム設定「前の入力ソースを選択」に割り当て・入力ソースは U.S. と Google のひらがなの 2 つ＝押すたびに入れ替わる）。
+//   ⌃⇧; は Google 日本語入力では「半角英数に表示切替」（打ちかけの字を半角に）だけ＝モードは変えない。Mac 版は英数のときキー設定を見ない（直接入力に「IME を有効化」が無い・⌃, の行は効かなかった）
+//   11-12 ⌃⇧J は Jump 越しに Enter に化けた（⌃＋英字は制御文字→ J=改行・K=PageUp・L=PageDown と 3 点一致）＝⌃＋英字は使わない・' は Base に無い（ユーザー「これ以外は無理？」）→ ユーザー「Ctrl . で」
+//   Fn/Num/Scr の記号は conditional-layers で「Jump 中にそのレイヤ」のときだけ J〜 を重ねる。既存 0〜4 の番号は変えない。　→ 11-11 重ねるのをやめた（conditional_layers をコメントに）
+#define JUMP 5
+#define JFN 6
+#define JNUM 7
+#define JSCR 8
+
+&mt {
+    flavor = "balanced";
+    quick-tap-ms = <0>;
+};
+
+/ {
+    behaviors {
+        z_shft: zmk,behavior-hold-tap {
+            compatible = "zmk,behavior-hold-tap";
+            #binding-cells = <2>;
+            flavor = "tap-preferred";
+            tapping-term-ms = <250>;
+            bindings = <&kp>, <&kp>;
+        };
+
+        tap1: tap_once {                // 引数のキーを 1 回だけ押して離す（長押しで押しっぱなしにしない＝OS のキーリピートで 2 つ動かない）
+            compatible = "zmk,behavior-macro-one-param";
+            #binding-cells = <1>;
+            bindings = <&macro_param_1to1>, <&macro_tap &kp MACRO_PLACEHOLDER>;
+        };
+
+        nav_ht: nav_hold_tap {          // R の 5way の左右: 短押し＝2 つ目・長押し＝1 つ目を 1 回
+            compatible = "zmk,behavior-hold-tap";
+            #binding-cells = <2>;
+            flavor = "tap-preferred";
+            tapping-term-ms = <200>;
+            bindings = <&tap1>, <&kp>;
+        };
+    };
+
+    // MKB2 の6個をそのまま5列へ移植（2026-08-24）。
+    // ★位置番号の写し方: MKBは1〜3行が12キー（L外周=ESC列 / R外周=BSPC列）。
+    //   その外周2列を落として10キー/行にしたので **arca = 10*行 + (MKBの列 - 1)**。
+    //   6個とも落とした列には掛かっていなかったので、指の位置は MKB と同じ。
+    //   ・cmd+w  Q W      (MKB 1 2)      ・cmd+t        R T      (MKB 5 4)
+    //   ・cmd+opt+u Y U   (MKB 6 7)      ・cmd+g[=LG(F)] F G     (MKB 17 16)
+    //   ・cmd+shift+v V B (MKB 29 28)    ・cmd+n        N M      (MKB 30 31)
+    // 足したい分は**焼き直さずDYAの実行時コンボ**で足せる（CONFIG_ZMK_RUNTIME_COMBO=y）
+
+    combos {
+        compatible = "zmk,combos";
+
+        cmd_w {
+            bindings = <&kp LG(W)>;
+            key-positions = <0 1>;
+        };
+
+        cmd_t {
+            bindings = <&kp LG(T)>;
+            key-positions = <4 3>;
+        };
+
+        cmd_opt_u {
+            bindings = <&kp LA(LG(U))>;
+            key-positions = <5 6>;
+        };
+
+        cmd_f {
+            bindings = <&kp LG(F)>;
+            key-positions = <14 13>;
+        };
+
+        cmd_shift_v {
+            bindings = <&kp LG(LS(V))>;
+            key-positions = <24 23>;
+        };
+
+        cmd_n {
+            bindings = <&kp LG(N)>;
+            key-positions = <25 26>;
+        };
+    };
+
+    // 11-09 Jump 中に Fn/Num/Scr を押したら JIS の並びの記号を重ねる → 11-11 外した
+    //   Jump 越しの MBP は US として読んでいた（JSCR の ( ) が「*（」・Jump を切ると（）が出た＝ユーザー「JUMP切ったら（）出た」）。
+    //   JFN/JNUM/JSCR のレイヤは番号（と DYA の並び）を変えないよう残す＝重ねないだけ。Jump はかな／英数の置き換えだけ
+    // conditional_layers {
+    //     compatible = "zmk,conditional-layers";
+    //     jump_fn { if-layers = <JUMP FUNC>; then-layer = <JFN>; };
+    //     jump_num { if-layers = <JUMP NUM>; then-layer = <JNUM>; };
+    //     jump_scr { if-layers = <JUMP SCROLL>; then-layer = <JSCR>; };
+    // };
+
+    keymap {
+        compatible = "zmk,keymap";
+
+        default_layer {
+            display-name = "Base";
+            bindings = <
+&kp Q             &kp W     &kp E                &kp R             &kp T                &kp Y      &kp U          &kp I          &kp O          &kp P
+&kp A             &kp S     &kp D                &kp F             &kp G                &kp H      &kp J          &kp K          &kp L          &kp MINUS
+&z_shft LSHIFT Z  &kp X     &kp C                &kp V             &kp B                &kp N      &kp M          &mkp MB1       &mkp MB2       &lt BT PERIOD
+&kp LCTRL         &kp LALT  &mt LGUI LANGUAGE_2  &lt SCROLL SPACE  &lt FUNC LANGUAGE_1  &kp BSPC   &lt NUM ENTER  &kp LG(SPACE)  &kp LS(ENTER)  &kp COMMA
+&kp UP            &kp LEFT  &kp ENTER            &kp RIGHT         &kp DOWN             &qmsc MOVE_Y(-QS_SPEED) PG_UP  &nav_ht LC(LEFT) HOME       &kp ENTER      &nav_ht LC(RIGHT) END        &qmsc MOVE_Y(QS_SPEED) PG_DN
+            >;
+        };
+
+        function_layer {
+            display-name = "Fn";
+            bindings = <
+&trans  &kp F2    &kp LC(LA(LEFT))  &kp LC(LA(RIGHT))  &kp F4         &kp F1            &kp F10               &trans         &trans                 &trans
+&trans  &trans    &trans            &trans             &kp SEMICOLON  &kp LEFT_BRACKET  &kp RIGHT_BRACKET     &kp SQT        &kp LS(LG(DOWN))       &trans
+&trans  &trans    &trans            &trans             &kp TILDE      &kp LESS_THAN     &kp GREATER_THAN      &kp LS(LG(D))  &kp LG(LS(NUMBER_4))   &kp LS(LG(NUMBER_5))
+&trans  &trans    &kp LS(NUMBER_2)  &kp EQUAL          &kp ENTER      &kp DELETE        &kp ENTER             &trans         &trans                 &trans
+&kp UP  &kp LEFT  &kp SPACE         &kp RIGHT          &kp DOWN       &kp C_VOLUME_UP   &kp LG(LEFT_BRACKET)  &kp ENTER      &kp LG(RIGHT_BRACKET)  &kp C_VOLUME_DOWN
+            >;
+        };
+
+        num_layer {
+            display-name = "Num";
+            bindings = <
+&kp TAB           &kp N7        &kp N8         &kp N9         &kp MINUS      &kp LC(LEFT)           &kp LC(RIGHT)  &kp LC(UP_ARROW)  &kp LC(DOWN)  &kp LC(LS(LG(Z)))
+&kp NUMBER_0      &kp NUMBER_4  &kp N5         &kp NUMBER_6   &kp COLON      &kp LG(RIGHT_BRACKET)  &kp AT_SIGN    &kp UP_ARROW      &kp EQUAL     &trans
+&mt LSHIFT SLASH  &kp NUMBER_1  &kp NUMBER_2   &kp NUMBER_3   &kp BACKSLASH  &kp LG(LEFT_BRACKET)   &kp LEFT       &kp DOWN          &kp RIGHT     &trans
+&kp LCTRL         &kp LEFT_ALT  &kp LGUI       &kp LC(LG(R))  &kp LC(LS(S))  &kp ENTER              &kp ENTER      &trans            &trans        &trans
+&kp LC(UP)        &kp LC(LEFT)  &kp LC(LG(F))  &kp LC(RIGHT)  &kp LC(DOWN)   &qmsc MOVE_Y(-QS_SPEED) PG_UP              &nav_ht LC(LEFT) HOME       &kp ENTER         &nav_ht LC(RIGHT) END       &qmsc MOVE_Y(QS_SPEED) PG_DN
+            >;
+        };
+
+        scroll_layer {
+            display-name = "Scr";
+            bindings = <
+&kp ESCAPE  &kp LG(F2)         &kp LC(LA(LEFT))  &kp LC(LA(RIGHT))     &kp PIPE               &kp LC(LA(D))     &kp LA(LC(E))      &kp LA(LC(F))  &kp LC(LA(T))     &kp LC(LA(G))
+&kp TAB     &kp DOUBLE_QUOTES  &kp AMPERSAND     &kp LEFT_PARENTHESIS  &kp RIGHT_PARENTHESIS  &kp LEFT_BRACKET  &kp RIGHT_BRACKET  &kp SQT        &kp LS(LG(DOWN))  &kp LC(LA(ENTER))
+&kp HASH    &kp PLUS           &kp EXCLAMATION   &kp QUESTION          &kp TILDE              &kp LG(A)         &kp LG(C)          &kp LG(V)      &kp LC(Q)         &kp LG(PLUS)
+&kp LCTRL   &trans             &kp EQUAL         &trans                &trans                 &kp DELETE        &trans             &kp LA(LG(V))  &kp LG(LS(V))     &kp LG(MINUS)
+&kp UP      &kp LEFT           &kp SPACE         &kp RIGHT             &kp DOWN               &kp LG(R)         &kp LS(LC(TAB))    &kp ENTER      &kp LC(TAB)       &mkp MB3
+            >;
+        };
+
+        bt_layer {
+            display-name = "BT";
+            bindings = <
+&bt BT_SEL 0  &trans                &trans          &kp LG(LA(MINUS))  &kp LG(LA(LS(EQUAL)))  &bt BT_CLR_ALL  &bt BT_SEL 1  &bt BT_SEL 2    &bt BT_SEL 3  &bt BT_SEL 4
+&bt BT_CLR    &trans                &trans          &kp LS(F11)        &kp LA(LS(S))          &trans          &trans        &tog JUMP       &trans        &trans
+&sys_reset    &bootloader           &studio_unlock  &trans             &trans                 &trans          &trans        &studio_unlock  &bootloader   &sys_reset
+&trans        &trans                &trans          &trans             &trans                 &bootloader     &trans        &trans          &trans        &trans
+&kp UP        &kp LG(LA(UP_ARROW))  &kp SPACE       &kp LG(LA(DOWN))   &kp DOWN               &qmsc MOVE_Y(-QS_SPEED) PG_UP       &nav_ht LC(LEFT) HOME      &kp ENTER       &nav_ht LC(RIGHT) END       &qmsc MOVE_Y(QS_SPEED) PG_DN
+            >;
+        };
+
+        jump_layer {                      // Base に重ねる: LANG2→⌃⇧;（英数）・LANG1→⌃.（Mac の「前の入力ソースを選択」＝U.S.⇔ひらがなのトグル）。ほかは透過
+            display-name = "Jump";
+            bindings = <
+&trans                 &trans                 &trans                 &trans                 &trans                 &trans                 &trans                 &trans                 &trans                 &trans
+&trans                 &trans                 &trans                 &trans                 &trans                 &trans                 &trans                 &trans                 &trans                 &trans
+&trans                 &trans                 &trans                 &trans                 &trans                 &trans                 &trans                 &trans                 &trans                 &trans
+&trans                 &trans                 &mt LGUI LC(LS(SEMI))  &trans                 &lt FUNC LC(DOT)        &trans                 &trans                 &trans                 &trans                 &trans
+&trans                 &trans                 &trans                 &trans                 &trans                 &trans                 &trans                 &trans                 &trans                 &trans
+            >;
+        };
+
+        jump_fn_layer {                      // Fn の記号を JIS の並びで: [ ] ' ~ @ = ⌘[ ⌘]（34 は Jump レイヤの LANG に隠されないよう元を写した）
+            display-name = "Fn";
+            bindings = <
+&trans                 &trans                 &trans                 &trans                 &trans                 &trans                 &trans                 &trans                 &trans                 &trans
+&trans                 &trans                 &trans                 &trans                 &trans                 &kp RIGHT_BRACKET      &kp NON_US_HASH        &kp LS(N7)             &trans                 &trans
+&trans                 &trans                 &trans                 &trans                 &kp LS(EQUAL)          &trans                 &trans                 &trans                 &trans                 &trans
+&trans                 &trans                 &kp LEFT_BRACKET       &kp LS(MINUS)          &kp ENTER              &trans                 &trans                 &trans                 &trans                 &trans
+&trans                 &trans                 &trans                 &trans                 &trans                 &trans                 &kp LG(RIGHT_BRACKET)  &trans                 &kp LG(NON_US_HASH)    &trans
+            >;
+        };
+
+        jump_num_layer {                      // Num の記号を JIS の並びで: : ⌘] @ = \（⌥¥・未確認） ⌘[（32/34 は Jump レイヤの LANG に隠されないよう元を写した）
+            display-name = "Num";
+            bindings = <
+&trans                 &trans                 &trans                 &trans                 &trans                 &trans                 &trans                 &trans                 &trans                 &trans
+&trans                 &trans                 &trans                 &trans                 &kp SQT                &kp LG(NON_US_HASH)    &kp LEFT_BRACKET       &trans                 &kp LS(MINUS)          &trans
+&trans                 &trans                 &trans                 &trans                 &kp LA(INT3)           &kp LG(RIGHT_BRACKET)  &trans                 &trans                 &trans                 &trans
+&trans                 &trans                 &kp LGUI               &trans                 &kp LC(LS(S))          &trans                 &trans                 &trans                 &trans                 &trans
+&trans                 &trans                 &trans                 &trans                 &trans                 &trans                 &trans                 &trans                 &trans                 &trans
+            >;
+        };
+
+        jump_scroll_layer {                      // Scr の記号を JIS の並びで: | " & ( ) [ ] ' + ~ ⌘+ =
+            display-name = "Scr";
+            bindings = <
+&trans             &trans             &trans             &trans             &kp LS(INT3)       &trans             &trans             &trans             &trans             &trans
+&trans             &kp LS(N2)         &kp LS(N6)         &kp LS(N8)         &kp LS(N9)         &kp RIGHT_BRACKET  &kp NON_US_HASH    &kp LS(N7)         &trans             &trans
+&trans             &kp LS(SEMI)       &trans             &trans             &kp LS(EQUAL)      &trans             &trans             &trans             &trans             &kp LG(LS(SEMI))
+&trans             &trans             &kp LS(MINUS)      &trans             &trans             &trans             &trans             &trans             &trans             &trans
+&trans             &trans             &trans             &trans             &trans             &trans             &trans             &trans             &trans             &trans
+            >;
+        };
+    };
+};

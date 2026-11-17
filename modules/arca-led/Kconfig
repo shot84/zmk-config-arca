@@ -1,0 +1,420 @@
+# ★色マクロ（本家 zmk-rgbled-widget から）。移植時に**これを写し忘れて**
+#   `default $(COLOR_GREEN)` が空文字に展開され Kconfig が落ちた（2026-08-24）。
+COLOR_BLACK   := 0
+COLOR_RED     := 1
+COLOR_GREEN   := 2
+COLOR_YELLOW  := 3
+COLOR_BLUE    := 4
+COLOR_MAGENTA := 5
+COLOR_CYAN    := 6
+COLOR_WHITE   := 7
+
+# Arca 状態LED（基板の SK6812MINI-E ×1）
+#
+# ★出自: caksoylar/zmk-rgbled-widget (MIT) の設定項目をそのまま踏襲し、
+#   出力先だけ「3本のGPIO LED」→「アドレサブル1個(led_strip)」に差し替えたもの。
+#   本家はアドレサブル非対応なので Arca の基板の LED を光らせられない。
+# ★XIAO内蔵LEDを使う RGBLED_WIDGET とは**排他**（同時に有効にしない）。
+
+# ══════════════════════════════════════════════════════════════════════
+# 充電の判定（include/arca_charge.h）— ★**ARCA_LED_WIDGET の外**に置く
+#   LCD側（zmk-module-arca-lcd）も同じヘッダを使う。状態LEDを切った版
+#   （build.sh の r2_nold / diag の bare）でも LCD の充電表示は生きるので、
+#   この値は widget の有無と無関係に定義されていなければならない。
+# ══════════════════════════════════════════════════════════════════════
+config ARCA_CHARGE_FULL_PCT
+    int "満充電とみなす電池残量(%)"
+    range 50 100
+    default 100
+    help
+      ★XIAOの充電IC(BQ25101)のCHG出力はピンに出ていないので、「充電が終わった」は
+      読めない。ここでの満充電は「給電されていて、かつ電池の読みがこの値以上」の近似。
+      充電中は端子電圧が持ち上がるので**セルが満タンになる前に100%に張り付く**＝
+      表示は少し早めに出る。早すぎると感じたら下げるのではなく、
+      **表示の意味を「給電中で、ほぼ満タン」と読むこと**（下げると更に早くなる）。
+
+config ARCA_LED_WIDGET
+    bool "Arca: 基板の SK6812 で電池/BLE/split/レイヤを表示する"
+    depends on ZMK_BLE || ZMK_USB
+    # ★2026-10-28 v5: 出力先は DT のエイリアスで決まる（src/widget.c）。
+    #   arca-led（rev3 の SK6812）→ LED_STRIP＋SPI ／ 無ければ XIAO内蔵（gpio-leds）→ LED
+    select LED_STRIP if $(dt_alias_enabled,arca-led)
+    select SPI if $(dt_alias_enabled,arca-led)
+    select LED if !$(dt_alias_enabled,arca-led)
+    help
+      基板の状態LED（SK6812MINI-E・蓋の導光棒の真下）に、電池残量・BLEプロファイル・
+      split接続・レイヤを色で出す。DIN は左右で別ピン（L=D6 / R=D19）。
+
+if ARCA_LED_WIDGET
+
+config ARCA_LED_BRIGHTNESS
+    int "明るさ（0-255）"
+    range 1 255
+    default 40
+    help
+      SK6812は素だと眩しい。導光棒越しなので40でも十分見える。
+
+
+
+config ARCA_LED_WIDGET_INTERVAL_MS
+    int "Minimum wait duration between two blinks in ms"
+    default 500
+
+# ══════════════════════════════════════════════════════════════════════
+# 充電インジケータ / 2026-08-30
+#   ★点滅ではなく**常灯**。XIAOの充電LEDの「じんわり」に寄せる。
+#   既存設計との関係: このモジュールは「点滅＝一過性の事件／休符の色＝いま続いている状態」
+#   という作りになっている（点滅のあと必ず led_layer_color へ戻る）。充電は続いている
+#   状態なので、**休符の色**に載せる。点滅は今までどおり手前で鳴って、鳴り終わったら
+#   充電の色へ戻る。優先順位は レイヤ色 > 充電 > 消灯。
+#   ★3bitの色(R/G/B のon/off)ではオレンジが作れないので、ここだけ生のRGBで持つ。
+# ══════════════════════════════════════════════════════════════════════
+config ARCA_LED_CHARGE
+    bool "充電中／満充電を低輝度の常灯で出す"
+    default y
+    help
+      給電（USB / ドックのポゴ）を検出している間、状態LEDを低輝度で点けっぱなしにする。
+      充電中＝オレンジ / 満充電＝グリーン。判定は include/arca_charge.h。
+
+if ARCA_LED_CHARGE
+
+config ARCA_LED_CHARGE_BRIGHTNESS
+    int "Charge indicator brightness (0-255)"
+    default 12
+    help
+      充電表示だけの輝度。通常表示（ARCA_LED_BRIGHTNESS=40）より弱く。
+      色は残量の連続グラデ（赤0%→緑100%）で、CHARGE_R/G/B・FULL_R/G/Bは
+      2026-09-01からグラデ式に置き換えられ未使用（互換のため定義は残す）。
+
+config ARCA_LED_CHARGE_POLL_MS
+    int "充電状態を見に行く間隔(ms)"
+    default 2000
+    range 200 60000
+    help
+      ★充電状態には**イベントが無い**。右(peripheral)は CONFIG_ZMK_USB すら立たないので
+      zmk_usb_conn_state_changed も飛んでこない。表示スレッドを増やさずに済ませるため、
+      LEDの処理スレッドが msgq を待つ時間に時限を付けて、暇なときだけ見に行っている。
+      レジスタ1回とキャッシュ済みの電池%を読むだけなので、短くしても負荷はほぼ無い。
+
+config ARCA_LED_CHARGE_R
+    int "充電中の赤(0-255)"
+    range 0 255
+    default 8
+config ARCA_LED_CHARGE_G
+    int "充電中の緑(0-255)"
+    range 0 255
+    default 3
+config ARCA_LED_CHARGE_B
+    int "充電中の青(0-255)"
+    range 0 255
+    default 0
+    help
+      ★既定の 8/3/0 は「8/255級のオレンジ」。導光棒越しに、消灯と見分く最低限。
+      赤に寄って見えたら緑を上げる（4〜5でだいぶ黄色に寄る）。
+      SK6812は1桁の値だと個体差が出やすいので、暗すぎたら3つとも同じ比で上げること。
+
+config ARCA_LED_FULL_R
+    int "満充電の赤(0-255)"
+    range 0 255
+    default 0
+config ARCA_LED_FULL_G
+    int "満充電の緑(0-255)"
+    range 0 255
+    default 8
+config ARCA_LED_FULL_B
+    int "満充電の青(0-255)"
+    range 0 255
+    default 0
+
+endif # ARCA_LED_CHARGE
+
+# Battery level settings
+
+choice ARCA_LED_WIDGET_BATTERY_SHOW
+    prompt "Which battery levels to indicate, non-defaults only work for split centrals"
+
+config ARCA_LED_WIDGET_BATTERY_SHOW_SELF
+    bool "Indicate battery level from self only"
+
+config ARCA_LED_WIDGET_BATTERY_SHOW_PERIPHERALS
+    bool "Indicate battery levels from self and peripherals (if split central)"
+    depends on (ZMK_SPLIT && ZMK_SPLIT_ROLE_CENTRAL)
+    select ZMK_SPLIT_BLE_CENTRAL_BATTERY_LEVEL_FETCHING
+
+config ARCA_LED_WIDGET_BATTERY_SHOW_ONLY_PERIPHERALS
+    bool "Indicate battery levels from peripherals only (if split central)"
+    depends on (ZMK_SPLIT && ZMK_SPLIT_ROLE_CENTRAL)
+    select ZMK_SPLIT_BLE_CENTRAL_BATTERY_LEVEL_FETCHING
+
+endchoice
+
+config ARCA_LED_WIDGET_BATTERY_BLINK_MS
+    int "Duration of battery level blink in ms"
+    default 2000
+
+config ARCA_LED_WIDGET_BATTERY_LEVEL_HIGH
+    int "High battery level percentage"
+    default 80
+
+config ARCA_LED_WIDGET_BATTERY_LEVEL_LOW
+    int "Low battery level percentage"
+    default 20
+
+config ARCA_LED_WIDGET_BATTERY_LEVEL_CRITICAL
+    int "Critical battery level percentage"
+    default 5
+
+config ARCA_LED_WIDGET_BATTERY_COLOR_HIGH
+    int "Color for high battery level (above LEVEL_HIGH)"
+    range 0 7
+    default $(COLOR_GREEN)
+
+config ARCA_LED_WIDGET_BATTERY_COLOR_MEDIUM
+    int "Color for medium battery level (between LEVEL_LOW and LEVEL_HIGH)"
+    range 0 7
+    default $(COLOR_YELLOW)
+
+config ARCA_LED_WIDGET_BATTERY_COLOR_LOW
+    int "Color for low battery level (below LEVEL_LOW)"
+    range 0 7
+    default $(COLOR_RED)
+
+config ARCA_LED_WIDGET_BATTERY_COLOR_CRITICAL
+    int "Color for critical battery level (below LEVEL_CRITICAL)"
+    range 0 7
+    default $(COLOR_RED)
+
+config ARCA_LED_WIDGET_BATTERY_COLOR_MISSING
+    int "Color for battery not detected, or peripheral disconnected"
+    range 0 7
+    default $(COLOR_MAGENTA)
+
+# Connectivity indicator settings
+config ARCA_LED_WIDGET_CONN_BLINK_MS
+    int "Duration of BLE connection status blink in ms"
+    default ARCA_LED_WIDGET_OUTPUT_BLINK_MS
+
+config ARCA_LED_WIDGET_CONN_SHOW_USB
+    bool "Show USB indicator instead of BLE status if it has priority"
+
+config ARCA_LED_WIDGET_OUTPUT_BLINK_MS  # DEPRECATED, do not use
+    int
+    default 1000
+
+config ARCA_LED_WIDGET_CONN_COLOR_CONNECTED
+    int "Color for connected BLE connection status"
+    range 0 7
+    default $(COLOR_BLUE)
+
+config ARCA_LED_WIDGET_CONN_COLOR_ADVERTISING
+    int "Color for advertising BLE connection status"
+    range 0 7
+    default $(COLOR_YELLOW)
+
+config ARCA_LED_WIDGET_CONN_COLOR_DISCONNECTED
+    int "Color for disconnected BLE connection status"
+    range 0 7
+    default $(COLOR_RED)
+
+config ARCA_LED_WIDGET_CONN_COLOR_USB
+    int "Color for USB endpoint active"
+    range 0 7
+    default $(COLOR_CYAN)
+
+# Layer indicator settings
+config ARCA_LED_WIDGET_SHOW_LAYER_CHANGE
+    bool "Indicate highest active layer on each layer change with a sequence of blinks"
+
+config ARCA_LED_WIDGET_LAYER_BLINK_MS
+    int "Blink and wait duration for layer indicator"
+    default 100
+
+config ARCA_LED_WIDGET_LAYER_COLOR
+    int "Color to use for layer indicator"
+    range 0 7
+    default $(COLOR_CYAN)
+
+config ARCA_LED_WIDGET_LAYER_DEBOUNCE_MS
+    int "Wait duration after a layer change before showing the highest active layer"
+    default 100
+
+# Constant layer color settings
+config ARCA_LED_WIDGET_SHOW_LAYER_COLORS
+    bool "Use custom colors for layers"
+
+config ARCA_LED_WIDGET_LAYER_0_COLOR
+    int "Color to use for the base layer"
+    range 0 7
+    default $(COLOR_BLACK)
+
+config ARCA_LED_WIDGET_LAYER_1_COLOR
+    int "Color to use for layer 1"
+    range 0 7
+    default $(COLOR_RED)
+
+config ARCA_LED_WIDGET_LAYER_2_COLOR
+    int "Color to use for layer 2"
+    range 0 7
+    default $(COLOR_GREEN)
+
+config ARCA_LED_WIDGET_LAYER_3_COLOR
+    int "Color to use for layer 3"
+    range 0 7
+    default $(COLOR_YELLOW)
+
+config ARCA_LED_WIDGET_LAYER_4_COLOR
+    int "Color to use for layer 4"
+    range 0 7
+    default $(COLOR_BLUE)
+
+config ARCA_LED_WIDGET_LAYER_5_COLOR
+    int "Color to use for layer 5"
+    range 0 7
+    default $(COLOR_MAGENTA)
+
+config ARCA_LED_WIDGET_LAYER_6_COLOR
+    int "Color to use for layer 6"
+    range 0 7
+    default $(COLOR_CYAN)
+
+config ARCA_LED_WIDGET_LAYER_7_COLOR
+    int "Color to use for layer 7"
+    range 0 7
+    default $(COLOR_WHITE)
+
+config ARCA_LED_WIDGET_LAYER_8_COLOR
+    int "Color to use for layer 8"
+    range 0 7
+    default $(COLOR_BLACK)
+
+config ARCA_LED_WIDGET_LAYER_9_COLOR
+    int "Color to use for layer 9"
+    range 0 7
+    default $(COLOR_BLACK)
+
+config ARCA_LED_WIDGET_LAYER_10_COLOR
+    int "Color to use for layer 10"
+    range 0 7
+    default $(COLOR_BLACK)
+
+config ARCA_LED_WIDGET_LAYER_11_COLOR
+    int "Color to use for layer 11"
+    range 0 7
+    default $(COLOR_BLACK)
+
+config ARCA_LED_WIDGET_LAYER_12_COLOR
+    int "Color to use for layer 12"
+    range 0 7
+    default $(COLOR_BLACK)
+
+config ARCA_LED_WIDGET_LAYER_13_COLOR
+    int "Color to use for layer 13"
+    range 0 7
+    default $(COLOR_BLACK)
+
+config ARCA_LED_WIDGET_LAYER_14_COLOR
+    int "Color to use for layer 14"
+    range 0 7
+    default $(COLOR_BLACK)
+
+config ARCA_LED_WIDGET_LAYER_15_COLOR
+    int "Color to use for layer 15"
+    range 0 7
+    default $(COLOR_BLACK)
+
+config ARCA_LED_WIDGET_LAYER_16_COLOR
+    int "Color to use for layer 16"
+    range 0 7
+    default $(COLOR_BLACK)
+
+config ARCA_LED_WIDGET_LAYER_17_COLOR
+    int "Color to use for layer 17"
+    range 0 7
+    default $(COLOR_BLACK)
+
+config ARCA_LED_WIDGET_LAYER_18_COLOR
+    int "Color to use for layer 18"
+    range 0 7
+    default $(COLOR_BLACK)
+
+config ARCA_LED_WIDGET_LAYER_19_COLOR
+    int "Color to use for layer 19"
+    range 0 7
+    default $(COLOR_BLACK)
+
+config ARCA_LED_WIDGET_LAYER_20_COLOR
+    int "Color to use for layer 20"
+    range 0 7
+    default $(COLOR_BLACK)
+
+config ARCA_LED_WIDGET_LAYER_21_COLOR
+    int "Color to use for layer 21"
+    range 0 7
+    default $(COLOR_BLACK)
+
+config ARCA_LED_WIDGET_LAYER_22_COLOR
+    int "Color to use for layer 22"
+    range 0 7
+    default $(COLOR_BLACK)
+
+config ARCA_LED_WIDGET_LAYER_23_COLOR
+    int "Color to use for layer 23"
+    range 0 7
+    default $(COLOR_BLACK)
+
+config ARCA_LED_WIDGET_LAYER_24_COLOR
+    int "Color to use for layer 24"
+    range 0 7
+    default $(COLOR_BLACK)
+
+config ARCA_LED_WIDGET_LAYER_25_COLOR
+    int "Color to use for layer 25"
+    range 0 7
+    default $(COLOR_BLACK)
+
+config ARCA_LED_WIDGET_LAYER_26_COLOR
+    int "Color to use for layer 26"
+    range 0 7
+    default $(COLOR_BLACK)
+
+config ARCA_LED_WIDGET_LAYER_27_COLOR
+    int "Color to use for layer 27"
+    range 0 7
+    default $(COLOR_BLACK)
+
+config ARCA_LED_WIDGET_LAYER_28_COLOR
+    int "Color to use for layer 28"
+    range 0 7
+    default $(COLOR_BLACK)
+
+config ARCA_LED_WIDGET_LAYER_29_COLOR
+    int "Color to use for layer 29"
+    range 0 7
+    default $(COLOR_BLACK)
+
+config ARCA_LED_WIDGET_LAYER_30_COLOR
+    int "Color to use for layer 30"
+    range 0 7
+    default $(COLOR_BLACK)
+
+config ARCA_LED_WIDGET_LAYER_31_COLOR
+    int "Color to use for layer 31"
+    range 0 7
+    default $(COLOR_BLACK)
+
+endif # ARCA_LED_WIDGET
+
+# ══════════════════════════════════════════════════════════════════════
+# 検死装置 — フォルトの現場（PC/LR/スレッド名/CFSR）を __noinit に記録し次の起動で印字。
+# 出力経路が巻き添えで死ぬ障害では「その場のログ」が原理的に残らない（2026-08-31 実録）。
+config ARCA_AUTOPSY
+    bool "Arca crash autopsy (record fatal PC/thread across reset)"
+    default y
+    select THREAD_NAME
+
+config ARCA_LED_DEBUG_FLASH_MARKER
+    bool "前回のリセットがフラッシュ操作中だったら起動時に白で点滅（消去=3回／書き込み=2回）"
+    default n
+    help
+      ★2026-09-04 の L 断続リセット調査の道具（widget.c indicate_flash_op_at_reset）。
+      2026-10-16 にユーザー「表面に出してるデバッグ的な機能消してほしい」で既定 n。

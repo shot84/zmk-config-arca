@@ -1,0 +1,13 @@
+file_format: "1"
+id: arca_v5
+name: Arca rev.2
+type: shield
+url: https://github.com/shot84/ark
+requires: [xiao_ble]
+features:
+  - keys
+  - display
+  - pointer
+siblings:
+  - arca_v5_left
+  - arca_v5_right

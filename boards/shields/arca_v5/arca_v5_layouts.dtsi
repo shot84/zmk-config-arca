@@ -1,0 +1,63 @@
+// 自動生成: gen_layout.py v5（正= chat-files/ark_layout.py（ARK_GEN=v4・ARK_LAYOUT=spar）＋5way は kicad/ark_v5_{L,R}）。手編集しない
+#include <physical_layouts.dtsi>
+
+/ {
+    arca_v5_layout: arca_v5_layout {
+        compatible = "zmk,physical-layout";
+        display-name = "Arca rev.2";
+        transform = <&default_transform>;
+        kscan = <&kscan0>;
+        keys
+            = <&key_physical_attrs  100  100     0    52       0    50   102>
+            , <&key_physical_attrs  100  100    99    35       0   149    85>
+            , <&key_physical_attrs  100  100   197    18       0   247    68>
+            , <&key_physical_attrs  100  100   296     0       0   346    50>
+            , <&key_physical_attrs  100  100   394     2       0   444    52>
+            , <&key_physical_attrs  100  100  1185     2       0  1235    52>
+            , <&key_physical_attrs  100  100  1284     0       0  1334    50>
+            , <&key_physical_attrs  100  100  1382    18       0  1432    68>
+            , <&key_physical_attrs  100  100  1481    35       0  1531    85>
+            , <&key_physical_attrs  100  100  1579    52       0  1629   102>
+            , <&key_physical_attrs  100  100     4   153  (-500)    54   203>
+            , <&key_physical_attrs  100  100   103   136  (-500)   153   186>
+            , <&key_physical_attrs  100  100   201   118  (-500)   251   168>
+            , <&key_physical_attrs  100  100   300   101  (-500)   350   151>
+            , <&key_physical_attrs  100  100   399   102  (-500)   449   152>
+            , <&key_physical_attrs  100  100  1181   102     500  1231   152>
+            , <&key_physical_attrs  100  100  1279   101     500  1329   151>
+            , <&key_physical_attrs  100  100  1378   118     500  1428   168>
+            , <&key_physical_attrs  100  100  1476   136     500  1526   186>
+            , <&key_physical_attrs  100  100  1575   153     500  1625   203>
+            , <&key_physical_attrs  100  100    18   253 (-1000)    68   303>
+            , <&key_physical_attrs  100  100   116   236 (-1000)   166   286>
+            , <&key_physical_attrs  100  100   215   218 (-1000)   265   268>
+            , <&key_physical_attrs  100  100   313   201 (-1000)   363   251>
+            , <&key_physical_attrs  100  100   412   202 (-1000)   462   252>
+            , <&key_physical_attrs  100  100  1168   202    1000  1218   252>
+            , <&key_physical_attrs  100  100  1266   201    1000  1316   251>
+            , <&key_physical_attrs  100  100  1365   218    1000  1415   268>
+            , <&key_physical_attrs  100  100  1463   236    1000  1513   286>
+            , <&key_physical_attrs  100  100  1562   253    1000  1612   303>
+            , <&key_physical_attrs  100  100    39   365 (-1500)    89   415>
+            , <&key_physical_attrs  100  100   138   348 (-1500)   188   398>
+            , <&key_physical_attrs  100  100   236   331 (-1500)   286   381>
+            , <&key_physical_attrs  100  100   522   294 (-1000)   572   344>
+            , <&key_physical_attrs  100  100   636   285       0   686   335>
+            , <&key_physical_attrs  100  100   944   285       0   994   335>
+            , <&key_physical_attrs  100  100  1057   294    1000  1107   344>
+            , <&key_physical_attrs  100  100  1343   331    1500  1393   381>
+            , <&key_physical_attrs  100  100  1441   348    1500  1491   398>
+            , <&key_physical_attrs  100  100  1540   365    1500  1590   415>
+            , <&key_physical_attrs   50   50   698   373       0   723   398>
+            , <&key_physical_attrs   50   50   668   403       0   693   428>
+            , <&key_physical_attrs   50   50   698   403       0   723   428>
+            , <&key_physical_attrs   50   50   727   403       0   752   428>
+            , <&key_physical_attrs   50   50   698   432       0   723   457>
+            , <&key_physical_attrs   50   50   932   373       0   957   398>
+            , <&key_physical_attrs   50   50   902   403       0   927   428>
+            , <&key_physical_attrs   50   50   932   403       0   957   428>
+            , <&key_physical_attrs   50   50   961   403       0   986   428>
+            , <&key_physical_attrs   50   50   932   432       0   957   457>
+            ;
+    };
+};

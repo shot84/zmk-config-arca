@@ -1,0 +1,79 @@
+# Arca rev.2（v5）/ 2026-10-28
+# ★Zephyr は boards/shields/*/Kconfig.defconfig を**全部**読む＝ここは必ず SHIELD_ARCA_V5_* で囲う
+#   （囲いの外に書くと rev3（ark）のビルドにも効いてしまう。逆も同じ＝ark 側の LCD の既定も ark で囲ってある）
+
+if SHIELD_ARCA_V5_LEFT
+
+# ★rev3（"Arca"）と並べて使っても Mac の一覧で区別できるように（基板の名前＝台帳 10-18「Arca rev.2」）
+config ZMK_KEYBOARD_NAME
+	default "Arca rev.2"
+
+# central＝左固定（rev3 と同じ）
+config ZMK_SPLIT_ROLE_CENTRAL
+	default y
+
+endif
+
+if SHIELD_ARCA_V5_LEFT || SHIELD_ARCA_V5_RIGHT
+
+config ZMK_SPLIT
+	default y
+
+# 両手ともトラボ（PMW3610）
+config ZMK_POINTING
+	default y
+
+# ── OLED（SSD1306 128×32・I2C）＝MeKaBu2（zmk-config-MKB2 Kconfig.defconfig）と同じ既定
+if ZMK_DISPLAY
+
+config I2C
+	default y
+
+config SSD1306
+	default y
+
+# ── 自前の縦の画面（zmk-module-arca-oled・台帳 11-02「北が上」「B」「①」「新しい a」）
+#   ★CONFIG_ARCA_OLED=y は arca_v5_{left,right}.conf に書く（ここで ARCA_OLED を参照すると、
+#     Zephyr が全シールドの defconfig を読むので rev3 のビルドにも arca-oled モジュールが要ることになる）
+choice ZMK_DISPLAY_STATUS_SCREEN
+	default ZMK_DISPLAY_STATUS_SCREEN_CUSTOM
+endchoice
+
+# ★カスタムにすると ZMK が組み込み画面のためだけに置いていた既定が黙って外れる（arca-fw §8.2・rev3 で踏んだ）
+#   メモリ（無いと起動しない）・mono テーマ（無いと何も映らない）・既定フォント（テーマが使う）
+config LV_Z_MEM_POOL_SIZE
+	default 4096
+
+config LV_USE_THEME_MONO
+	default y
+
+config LV_FONT_MONTSERRAT_16
+	default y
+
+choice LV_FONT_DEFAULT
+	default LV_FONT_DEFAULT_MONTSERRAT_16
+endchoice
+
+config LV_FONT_MONTSERRAT_12
+	default y
+
+endif # ZMK_DISPLAY
+
+if LVGL
+
+config LV_Z_VDB_SIZE
+	default 64
+
+config LV_DPI_DEF
+	default 148
+
+config LV_Z_BITS_PER_PIXEL
+	default 1
+
+choice LV_COLOR_DEPTH
+	default LV_COLOR_DEPTH_1
+endchoice
+
+endif # LVGL
+
+endif

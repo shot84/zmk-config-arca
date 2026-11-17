@@ -1,0 +1,94 @@
+// Arca rev.2（v5）左手（central）/ 2026-10-28
+// 正 = ark_body_net_v5.XIAO_ASSIGN["L"]・照合 = chat-files/ark_fw_v5_check.py
+//   線 1..6 = D0 D1 D2 D3 D4 D6 ／ INTR = D5
+//   センサ: SCLK = D7(P1.12)・SDIO = D8(P1.13)・CS = NFC2(P0.09)・MOTION = NFC1(P0.10)（★10-31: 足形の NFC1/NFC2 は Seeed と逆）
+//   OLED: D9/D10（arca_v5.dtsi）
+#include "arca_v5.dtsi"
+#include <input/processors.dtsi>
+#include <dt-bindings/zmk/input_transform.h>
+#include <zephyr/dt-bindings/input/input-event-codes.h>
+// DYA: 実行時に変えられる入力 processor（mouse_/scroll_runtime_input_processor）。
+//   **CONFIG を立てただけでは「対象 0 個」**＝リスナの input-processors に繋いで初めて出る（arca-fw §5）
+#include <input/processors/runtime-input-processor.dtsi>
+
+&kscan0 {
+    gpios
+        = <&xiao_d 0 GPIO_ACTIVE_HIGH>     // 線 1
+        , <&xiao_d 1 GPIO_ACTIVE_HIGH>     // 線 2
+        , <&xiao_d 2 GPIO_ACTIVE_HIGH>     // 線 3
+        , <&xiao_d 3 GPIO_ACTIVE_HIGH>     // 線 4
+        , <&xiao_d 4 GPIO_ACTIVE_HIGH>     // 線 5
+        , <&xiao_d 6 GPIO_ACTIVE_HIGH>     // 線 6（5way のコモン）
+        ;
+    interrupt-gpios = <&xiao_d 5 GPIO_ACTIVE_HIGH>;   // INTR
+};
+
+// ■ PMW3610（センサ基板・FH12 の J1・FFC で J_MOD へ）。3 線 SPI＝MOSI/MISO を同じピンに（rev3 の PAW3222 と同じ手）
+&pinctrl {
+    spi0_default: spi0_default {
+        group1 {
+            psels = <NRF_PSEL(SPIM_SCK, 1, 12)>,
+                    <NRF_PSEL(SPIM_MOSI, 1, 13)>,
+                    <NRF_PSEL(SPIM_MISO, 1, 13)>;
+        };
+    };
+
+    spi0_sleep: spi0_sleep {
+        group1 {
+            psels = <NRF_PSEL(SPIM_SCK, 1, 12)>,
+                    <NRF_PSEL(SPIM_MOSI, 1, 13)>,
+                    <NRF_PSEL(SPIM_MISO, 1, 13)>;
+            low-power-enable;
+        };
+    };
+};
+
+&spi0 {
+    status = "okay";
+    compatible = "nordic,nrf-spim";
+    pinctrl-0 = <&spi0_default>;
+    pinctrl-1 = <&spi0_sleep>;
+    pinctrl-names = "default", "sleep";
+    cs-gpios = <&gpio0 9 GPIO_ACTIVE_LOW>;           // CS = NFC2（★10-31: P0.09）
+
+    // ドライバ = cormoran/zmk-driver-pmw3610-with-custom-studio-rpc（DYA Dash と同じ）。
+    //   cpi・軸の反転/入れ替え・force-awake などは **DYA で実行時に変えられる**（CONFIG_ZMK_PMW3610_CUSTOM_SETTINGS）
+    trackball: trackball@0 {
+        status = "okay";
+        compatible = "cormoran,pmw3610";
+        reg = <0>;
+        spi-max-frequency = <2000000>;
+        irq-gpios = <&gpio0 10 (GPIO_ACTIVE_LOW | GPIO_PULL_UP)>;  // MOTION = NFC1（★10-31: P0.10）
+        cpi = <800>;                                                // MeKaBu2 と同じ（memory: MKB2 cpi 800）
+        // force-awake は付けない（11-09）: 休止から戻るたびにドライバがセンサを起こし直し（性能レジスタ 0x1→0xf1）、止まった玉で
+        //   偽の動き＝勝手なスクロールが出ていた（ログ版で確認）。MeKaBu/Spar も force-awake は R（ポインタ）だけで L のスクロールには無い
+        //   （11-02 に R の設定を L にも写して「MeKaBu2 と同じ」と書いたのが誤り）
+        evt-type = <INPUT_EV_REL>;
+        x-input-code = <INPUT_REL_X>;
+        y-input-code = <INPUT_REL_Y>;
+        settings-id = "left";                                       // 左右のセンサを DYA で別々に覚える
+    };
+};
+
+/ {
+    // 自分のトラボ（L 直結）＝常時スクロール（rev3 09-01 のユーザー指定・MKB2 のレシピ）。
+    //   向き（上下/左右）は **DYA の PMW3610 の軸**で直す（焼き直し不要）
+    trackball_listener {
+        compatible = "zmk,input-listener";
+        device = <&trackball>;
+        input-processors = <&zip_xy_to_scroll_mapper
+                            &zip_scroll_scaler 1 48>;   // 11-10 ユーザー「スクロール量は1/48にしたいかな」（前は 1/24＝rev3 09-01）
+    };
+};
+
+// R のトラボ（split で受ける）＝ポインタ。Scr レイヤの間だけスクロール（rev3 と同じ）
+&tb_split_listener {
+    status = "okay";
+    input-processors = <&mouse_runtime_input_processor>;
+
+    scroller {
+        // 3 = arca_v5.keymap の `#define SCROLL 3`（overlay から #define は見えない＝数値・ゲートが照合）
+        layers = <3>;
+        input-processors = <&zip_xy_to_scroll_mapper &scroll_runtime_input_processor>;
+    };
+};

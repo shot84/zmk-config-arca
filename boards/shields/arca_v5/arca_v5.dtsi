@@ -1,0 +1,146 @@
+// Arca rev.2（設計上の名前 v5）— 共通シールド定義 / 2026-10-28
+//
+// ■ 正
+//   ピン      = chat-files/ark_body_net_v5.py の XIAO_ASSIGN（L/R 別・XIAO は鏡にしない）
+//   キー→線/バス = 同 charlie(half)（R は L と同じ表・5way の NAV_BUS だけ L/R で違う）
+//   5way の方向 = chat-files/ark_body_net.py の NAV_PAD_TO_DIR / _R（rev3 の実測）。
+//               ★v5 の NAV の足形・置く向き・パッド名は rev3 と L/R とも同じ（KiCad で照合 10-28）＝同じ表が効く
+//   照合      = chat-files/ark_fw_v5_check.py（恒久ゲート・壊すと落ちる）
+//
+// ■ rev3（ark）との違い
+//   ・マトリクス → **チャーリープレックス**（線 6＋INTR 1・ダイオード DL/DI で INTR に集める＝v4/v5 の回路）
+//   ・ENC なし・LCD なし → **OLED 0.91" 128×32（SSD1306・I2C）**
+//   ・外付けの SK6812 なし → **XIAO 内蔵の RGB**（台帳 E4）
+//   ・トラボは**左右とも PMW3610**（センサ基板 1 種・R は 180° 回して付ける）
+//   ・位置番号（キー順）は rev3 と同じ＝キーマップは rev3 の並びのまま（指 4 行[L5+R5]→L ナビ 5→R ナビ 5）
+
+#include <dt-bindings/zmk/matrix_transform.h>
+
+/ {
+    chosen {
+        zmk,kscan = &kscan0;
+        zmk,physical-layout = &arca_v5_layout;   // DYA の画面（arca_v5_layouts.dtsi・gen_layout.py v5）
+    };
+
+    // ■ チャーリーの RC(行, 列) ＝ RC(駆動する線 − 1, 読む線 − 1)
+    //   zmk kscan_gpio_charlieplex: row＝出力にした gpios の番号・col＝入力で読む番号。
+    //   キー（線 ln, バス b）は「線 ln を High → ソケット → キーのダイオード → バス b → DL_b → 線 b」で読める
+    //   ＝RC(ln−1, b−1)。R は col-offset 6。
+    // ■ 5way の行（L/R とも 実際に倒す向き UP LEFT CENTER RIGHT DOWN の順）
+    //   L: UP=パッド DOWN（バス 2）・LEFT=パッド UP（5）・CENTER（4）・RIGHT=パッド RIGHT（1）・DOWN=パッド LEFT（3）
+    //   R: UP=パッド UP（3）・LEFT=パッド LEFT（1）・CENTER（2）・RIGHT=パッド DOWN（5）・DOWN=パッド RIGHT（4）
+    //   ★実機で違ったら transform を手で直さず ark_body_net.NAV_PAD_TO_DIR(_R) を直す（ゲートが追従する）
+    default_transform: keymap_transform_0 {
+        compatible = "zmk,matrix-transform";
+        columns = <12>;
+        rows = <6>;
+        map = <
+RC(0,5) RC(1,5) RC(2,5) RC(3,5) RC(4,5)      RC(4,11) RC(3,11) RC(2,11) RC(1,11) RC(0,11)
+RC(0,1) RC(1,0) RC(2,1) RC(3,1) RC(4,1)      RC(4,7)  RC(3,7)  RC(2,7)  RC(1,6)  RC(0,7)
+RC(0,3) RC(1,3) RC(2,3) RC(3,2) RC(4,3)      RC(4,9)  RC(3,8)  RC(2,9)  RC(1,9)  RC(0,9)
+RC(0,4) RC(1,4) RC(2,4) RC(4,2) RC(4,0)      RC(4,6)  RC(4,8)  RC(2,10) RC(1,10) RC(0,10)
+RC(5,1) RC(5,4) RC(5,3) RC(5,0) RC(5,2)      RC(5,8)  RC(5,6)  RC(5,7)  RC(5,10) RC(5,9)
+        >;
+    };
+
+    // gpios / interrupt-gpios は per-side（arca_v5_left/right.overlay）。
+    // ★GPIO_ACTIVE_HIGH だけ書く: ドライバが入力に**プルダウン**を自分で付ける
+    //   （kscan_gpio_charlieplex.c: ACTIVE_LOW ならプルアップ・それ以外はプルダウン）。INTR も同じ。
+    kscan0: kscan {
+        compatible = "zmk,kscan-gpio-charlieplex";
+        // ★ディープスリープ（CONFIG_ZMK_SLEEP）から**キーで起こす**（rev3 09-29 と同じ）。
+        //   眠るとき kscan だけ suspend されず、全線 High＋INTR の割り込み待ちのまま System OFF＝
+        //   どのキー（5way 含む）でも INTR が立って起きる
+        wakeup-source;
+    };
+
+    // 両手のトラボ（PMW3610）。R の動きは split で L（central）へ送る
+    split_inputs {
+        #address-cells = <1>;
+        #size-cells = <0>;
+
+        tb_split: tb_split@0 {
+            compatible = "zmk,input-split";
+            reg = <0>;
+        };
+    };
+
+    tb_split_listener: tb_split_listener {
+        compatible = "zmk,input-listener";
+        status = "disabled";
+        device = <&tb_split>;
+    };
+
+    // XIAO 内蔵の RGB（ボード定義の gpio-leds: 赤 P0.26・緑 P0.30・青 P0.06）を状態 LED に
+    // （zmk-module-arca-led の GPIO 出力・台帳 E4「MeKaBu の rgbled_adapter と同じ」）
+    aliases {
+        led-red = &led0;
+        led-green = &led1;
+        led-blue = &led2;
+    };
+};
+
+// ★ボード（xiao_ble）既定の周辺で v5 のピンと重なるもの（rev3 09-30「起きない」の教訓・dts_pin_check が見る）
+//   ・xiao_spi（spi2: P1.13/14/15＝D8/D9/D10）… v5 はセンサの SPI（D7/D8 or D6/D8）と OLED（D9/D10）に使う → 止める
+//   ・xiao_i2c（i2c1: P0.04/P0.05＝D4/D5）… v5 は D4＝線 5・D5＝INTR（L）/CS（R）→ ピンを D9/D10 へ付け替えて OLED に使う
+&xiao_spi {
+    status = "disabled";
+};
+
+// ■ OLED（I2C1・SDA＝D9 P1.14／SCL＝D10 P1.15＝MeKaBu と同じ・台帳 E3）
+//   プルアップは OLED モジュールの上の物（ark_body_net_v5 の注記）＋ nRF の内蔵（bias-pull-up）
+&pinctrl {
+    i2c1_default: i2c1_default {
+        group1 {
+            psels = <NRF_PSEL(TWIM_SDA, 1, 14)>,
+                    <NRF_PSEL(TWIM_SCL, 1, 15)>;
+            bias-pull-up;
+        };
+    };
+
+    i2c1_sleep: i2c1_sleep {
+        group1 {
+            psels = <NRF_PSEL(TWIM_SDA, 1, 14)>,
+                    <NRF_PSEL(TWIM_SCL, 1, 15)>;
+            low-power-enable;
+            bias-pull-up;
+        };
+    };
+};
+
+&xiao_i2c {
+    status = "okay";
+    pinctrl-0 = <&i2c1_default>;
+    pinctrl-1 = <&i2c1_sleep>;
+    pinctrl-names = "default", "sleep";
+    clock-frequency = <I2C_BITRATE_STANDARD>;
+
+    // MC091GX（0.91" 128×32・SSD1306）。値は MeKaBu2（zmk-config-MKB2 MKB_R_Base.overlay）と同じ。
+    // ★向き: v5 は**ヘッダが南・表示が北**＝縦長に置いている（台帳 10-18）。組み込み画面は横長前提なので
+    //   字は横倒しに出た（11-02 ユーザー: 左右とも「東を下にすると読める」）。
+    //   → 11-02 から自前の縦の画面（zmk-module-arca-oled・北が上）。縦→横の写しはそのモジュールの中
+    //   （上下が逆なら CONFIG_ARCA_OLED_ROT180・白黒が逆なら CONFIG_ARCA_OLED_INK_BLACK=n。ここの DT は触らない）
+    oled: ssd1306@3c {
+        compatible = "solomon,ssd1306fb";
+        reg = <0x3c>;
+        width = <128>;
+        height = <32>;
+        segment-offset = <0>;
+        page-offset = <0>;
+        display-offset = <0>;
+        multiplex-ratio = <31>;
+        segment-remap;
+        com-invdir;
+        com-sequential;
+        inversion-on;
+        prechargep = <0x22>;
+    };
+};
+
+/ {
+    chosen {
+        zephyr,display = &oled;
+    };
+};
+
+#include "arca_v5_layouts.dtsi"

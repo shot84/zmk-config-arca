@@ -1,0 +1,717 @@
+diff --git a/drivers/flash/soc_flash_nrf.c b/drivers/flash/soc_flash_nrf.c
+index 9e1ba6831..aa157289f 100644
+--- a/drivers/flash/soc_flash_nrf.c
++++ b/drivers/flash/soc_flash_nrf.c
+@@ -50,6 +50,17 @@ static int write_op(void *context); /* instance of flash_op_handler_t */
+ static int write_synchronously(off_t addr, const void *data, size_t len);
+ 
+ static int erase_op(void *context); /* instance of flash_op_handler_t */
++
++/* Arca (2026-09-04): survives a reset (noinit RAM). Set while a flash op runs so the next
++ * boot can tell whether the previous run died inside a flash erase/write (radio blackout).
++ * Read and cleared by the Arca LED widget at boot. */
++__noinit volatile uint32_t nrf_flash_op_in_progress;
++volatile uint32_t nrf_flash_op_last_end_ms;
++volatile uint32_t nrf_flash_op_last_start_ms;
++volatile uint32_t nrf_flash_op_count;
++volatile uint8_t nrf_flash_op_last_type;
++#define NRF_FLASH_OP_MARK_ERASE 0xF1A5E001U
++#define NRF_FLASH_OP_MARK_WRITE 0xF1A5E002U
+ static int erase_synchronously(uint32_t addr, uint32_t size);
+ #endif /* !CONFIG_SOC_FLASH_NRF_RADIO_SYNC_NONE */
+ 
+@@ -341,7 +352,14 @@ static int erase_synchronously(uint32_t addr, uint32_t size)
+ 	};
+ 
+ 	nrf_flash_sync_set_context(FLASH_SLOT_ERASE);
+-	return nrf_flash_sync_exe(&flash_op_desc);
++	nrf_flash_op_in_progress = NRF_FLASH_OP_MARK_ERASE;
++	nrf_flash_op_last_type = 'E';
++	nrf_flash_op_last_start_ms = k_uptime_get_32();
++	int rc = nrf_flash_sync_exe(&flash_op_desc);
++	nrf_flash_op_in_progress = 0U;
++	nrf_flash_op_last_end_ms = k_uptime_get_32();
++	nrf_flash_op_count++;
++	return rc;
+ }
+ 
+ static int write_synchronously(off_t addr, const void *data, size_t len)
+@@ -359,7 +377,14 @@ static int write_synchronously(off_t addr, const void *data, size_t len)
+ 	};
+ 
+ 	nrf_flash_sync_set_context(FLASH_SLOT_WRITE);
+-	return nrf_flash_sync_exe(&flash_op_desc);
++	nrf_flash_op_in_progress = NRF_FLASH_OP_MARK_WRITE;
++	nrf_flash_op_last_type = 'W';
++	nrf_flash_op_last_start_ms = k_uptime_get_32();
++	int rc = nrf_flash_sync_exe(&flash_op_desc);
++	nrf_flash_op_in_progress = 0U;
++	nrf_flash_op_last_end_ms = k_uptime_get_32();
++	nrf_flash_op_count++;
++	return rc;
+ }
+ 
+ #endif /* !CONFIG_SOC_FLASH_NRF_RADIO_SYNC_NONE */
+diff --git a/subsys/bluetooth/controller/ll_sw/lll.h b/subsys/bluetooth/controller/ll_sw/lll.h
+index 3abddb9e8..66bb0f74d 100644
+--- a/subsys/bluetooth/controller/ll_sw/lll.h
++++ b/subsys/bluetooth/controller/ll_sw/lll.h
+@@ -14,7 +14,16 @@
+ #define TICKER_USER_ID_ULL_LOW  MAYFLY_CALL_ID_2
+ #define TICKER_USER_ID_THREAD   MAYFLY_CALL_ID_PROGRAM
+ 
+-#define EVENT_PIPELINE_MAX 7
++/* Arca (2026-09-04): prepare pipeline depth 7 -> 11, mirroring upstream PR #92572
++ * (EVENT_PIPELINE_MAX = 7 + EVENT_DEFER_MAX). Overflow here trips LL_ASSERT(next) in
++ * lll_prepare_resolve() when two connections (split link + host) plus scan/adv overlap
++ * under heavy pointer traffic. Only the depth is taken; the defer machinery is not.
++ */
++#define EVENT_DEFER_MAX 4U
++/* Arca (2026-09-04, flight recorder evidence): a flash page erase (~90 ms, radio aborted by
++ * soc_flash_nrf_ticker) leaves the current event hung; with two links at 7.5/15 ms up to 18
++ * prepares queue up before the radio is released. 24 swallows one erase. */
++#define EVENT_PIPELINE_MAX 48U   /* 2026-09-05: 126 ms blackout observed (NVS erase+write) = 25 prepares; 48 covers ~240 ms */
+ 
+ #define ADV_INT_UNIT_US          625U
+ #define SCAN_INT_UNIT_US         625U
+diff --git a/subsys/bluetooth/controller/ll_sw/nordic/hal/nrf5/radio/radio.c b/subsys/bluetooth/controller/ll_sw/nordic/hal/nrf5/radio/radio.c
+index 83c250923..e675b3a4e 100644
+--- a/subsys/bluetooth/controller/ll_sw/nordic/hal/nrf5/radio/radio.c
++++ b/subsys/bluetooth/controller/ll_sw/nordic/hal/nrf5/radio/radio.c
+@@ -144,10 +144,19 @@ NRF_DT_CHECK_GPIO_CTLR_IS_SOC(FEM_NODE, pdn_gpios, "pdn-gpios");
+ #define DF_S0_MASK_CP_BIT_IN_DATA_CHANNEL_PDU 0x20
+ 
+ static radio_isr_cb_t isr_cb;
++/* Arca (2026-09-07): evidence for the stuck-event recorder in lll.c */
++volatile uint32_t arca_radio_isr_ticks;
++volatile uint16_t arca_radio_isr_count;
++void *arca_radio_isr_cb_get(void)
++{
++	return (void *)isr_cb;
++}
+ static void           *isr_cb_param;
+ 
+ void isr_radio(void)
+ {
++	arca_radio_isr_ticks = cntr_cnt_get();
++	arca_radio_isr_count++;
+ 	if (radio_has_disabled()) {
+ 		isr_cb(isr_cb_param);
+ 	}
+@@ -155,15 +164,8 @@ void isr_radio(void)
+ 
+ void radio_isr_set(radio_isr_cb_t cb, void *param)
+ {
+-	irq_disable(HAL_RADIO_IRQn);
+-
+ 	isr_cb_param = param;
+ 	isr_cb = cb;
+-
+-	nrf_radio_int_enable(NRF_RADIO, HAL_RADIO_INTENSET_DISABLED_Msk);
+-
+-	NVIC_ClearPendingIRQ(HAL_RADIO_IRQn);
+-	irq_enable(HAL_RADIO_IRQn);
+ }
+ 
+ void radio_setup(void)
+@@ -197,7 +199,6 @@ void radio_setup(void)
+ 
+ void radio_reset(void)
+ {
+-	irq_disable(HAL_RADIO_IRQn);
+ 
+ 	/* nRF SoC generic radio reset/initializations
+ 	 * Note: Only registers whose bits are partially modified across
+@@ -573,6 +574,9 @@ void radio_disable(void)
+ 	hal_radio_sw_switch_cleanup();
+ #endif /* !CONFIG_BT_CTLR_TIFS_HW */
+ 
++	/* Reset/disable PPI/DPPI */
++	radio_tmr_status_reset();
++
+ 	NRF_RADIO->SHORTS = 0;
+ 	nrf_radio_task_trigger(NRF_RADIO, NRF_RADIO_TASK_DISABLE);
+ }
+@@ -1494,12 +1498,11 @@ uint32_t radio_tmr_start(uint8_t trx, uint32_t ticks_start, uint32_t remainder)
+ 	last_pdu_end_us_init(latency_us);
+ 
+ #else /* !CONFIG_BT_CTLR_SW_SWITCH_SINGLE_TIMER */
+-	nrf_timer_task_trigger(SW_SWITCH_TIMER, NRF_TIMER_TASK_CLEAR);
+ 	SW_SWITCH_TIMER->MODE = 0;
+ 	SW_SWITCH_TIMER->PRESCALER = HAL_EVENT_TIMER_PRESCALER_VALUE;
+ 	SW_SWITCH_TIMER->BITMODE = 0; /* 16 bit */
+-	/* FIXME: start along with EVENT_TIMER, to save power */
+-	nrf_timer_task_trigger(SW_SWITCH_TIMER, NRF_TIMER_TASK_START);
++
++	hal_sw_switch_timer_start_ppi_config();
+ #endif /* !CONFIG_BT_CTLR_SW_SWITCH_SINGLE_TIMER */
+ 
+ 	hal_sw_switch_timer_clear_ppi_config();
+diff --git a/subsys/bluetooth/controller/ll_sw/nordic/hal/nrf5/radio/radio_nrf5_dppi.h b/subsys/bluetooth/controller/ll_sw/nordic/hal/nrf5/radio/radio_nrf5_dppi.h
+index 4dabe97d9..52d470e80 100644
+--- a/subsys/bluetooth/controller/ll_sw/nordic/hal/nrf5/radio/radio_nrf5_dppi.h
++++ b/subsys/bluetooth/controller/ll_sw/nordic/hal/nrf5/radio/radio_nrf5_dppi.h
+@@ -241,6 +241,13 @@ static inline void hal_trigger_crypt_by_bcmatch_ppi_config(void)
+ #define HAL_RADIO_GROUP_TASK_ENABLE_PUBLISH_END HAL_RADIO_PUBLISH_PHYEND
+ #endif /* !CONFIG_BT_CTLR_SW_SWITCH_SINGLE_TIMER || CONFIG_BT_CTLR_DF */
+ 
++/* Start SW-switch timer on event timer start.
++ */
++static inline void hal_sw_switch_timer_start_ppi_config(void)
++{
++	nrf_timer_subscribe_set(SW_SWITCH_TIMER, NRF_TIMER_TASK_START, HAL_EVENT_TIMER_START_PPI);
++}
++
+ /* Clear SW-switch timer on packet end:
+  * wire the RADIO EVENTS_END event to SW_SWITCH_TIMER TASKS_CLEAR task.
+  *
+diff --git a/subsys/bluetooth/controller/ll_sw/nordic/hal/nrf5/radio/radio_nrf5_ppi.h b/subsys/bluetooth/controller/ll_sw/nordic/hal/nrf5/radio/radio_nrf5_ppi.h
+index d9ead6803..bd08d476c 100644
+--- a/subsys/bluetooth/controller/ll_sw/nordic/hal/nrf5/radio/radio_nrf5_ppi.h
++++ b/subsys/bluetooth/controller/ll_sw/nordic/hal/nrf5/radio/radio_nrf5_ppi.h
+@@ -292,6 +292,18 @@ static inline void hal_trigger_rateoverride_ppi_config(void)
+ 
+ #if !defined(CONFIG_BT_CTLR_SW_SWITCH_SINGLE_TIMER)
+ 
++/* Start SW-switch timer setup.
++ */
++static inline void hal_sw_switch_timer_start_ppi_config(void)
++{
++	/* Switch timer is started on first and subsequent Radio IFS-end events
++	 * (END or PHYEND; see HAL_RADIO_IFS_EVENTS_END) which also clear the timer
++	 * value via HAL_SW_SWITCH_TIMER_CLEAR_PPI PPI.
++	 */
++	nrf_ppi_fork_endpoint_setup(NRF_PPI, HAL_SW_SWITCH_TIMER_CLEAR_PPI,
++				    (uint32_t)&(SW_SWITCH_TIMER->TASKS_START));
++}
++
+ /* Clear SW-switch timer on packet end:
+  * wire the RADIO EVENTS_END event to SW_SWITCH_TIMER TASKS_CLEAR task.
+  *
+@@ -300,6 +312,7 @@ static inline void hal_trigger_rateoverride_ppi_config(void)
+ 
+ static inline void hal_sw_switch_timer_clear_ppi_config(void)
+ {
++	/* Switch timer is cleared (and started via fork) on each Radio IFS-end event. */
+ 	nrf_ppi_channel_endpoint_setup(
+ 		NRF_PPI,
+ 		HAL_SW_SWITCH_TIMER_CLEAR_PPI,
+@@ -410,6 +423,15 @@ static inline void hal_radio_txen_on_sw_switch(uint8_t compare_reg_index, uint8_
+ 
+ 	nrf_ppi_task_endpoint_setup(NRF_PPI, radio_enable_ppi,
+ 				    HAL_SW_SWITCH_RADIO_ENABLE_PPI_TASK_TX);
++
++#if !defined(CONFIG_BT_CTLR_SW_SWITCH_SINGLE_TIMER)
++	nrf_ppi_fork_endpoint_setup(NRF_PPI, radio_enable_ppi,
++				    (uint32_t)&(SW_SWITCH_TIMER->TASKS_STOP));
++	/* NOTE: HAL_SW_SWITCH_TIMER_CLEAR_PPI is re-enabled by sw_switch(), so the
++	 *       switch timer will be (re)started on the next Radio IFS-end event.
++	 *       No explicit code to enable or set up switch-timer start is required here.
++	 */
++#endif /* !CONFIG_BT_CTLR_SW_SWITCH_SINGLE_TIMER */
+ }
+ 
+ static inline void hal_radio_b2b_txen_on_sw_switch(uint8_t compare_reg_index,
+@@ -436,6 +458,15 @@ static inline void hal_radio_rxen_on_sw_switch(uint8_t compare_reg_index, uint8_
+ 
+ 	nrf_ppi_task_endpoint_setup(NRF_PPI, radio_enable_ppi,
+ 				    HAL_SW_SWITCH_RADIO_ENABLE_PPI_TASK_RX);
++
++#if !defined(CONFIG_BT_CTLR_SW_SWITCH_SINGLE_TIMER)
++	nrf_ppi_fork_endpoint_setup(NRF_PPI, radio_enable_ppi,
++				    (uint32_t)&(SW_SWITCH_TIMER->TASKS_STOP));
++	/* NOTE: HAL_SW_SWITCH_TIMER_CLEAR_PPI is re-enabled by sw_switch(), so the
++	 *       switch timer will be (re)started on the next Radio IFS-end event.
++	 *       No explicit code to enable or set up switch-timer start is required here.
++	 */
++#endif /* !CONFIG_BT_CTLR_SW_SWITCH_SINGLE_TIMER */
+ }
+ 
+ static inline void hal_radio_b2b_rxen_on_sw_switch(uint8_t compare_reg_index,
+diff --git a/subsys/bluetooth/controller/ll_sw/nordic/lll/lll.c b/subsys/bluetooth/controller/ll_sw/nordic/lll/lll.c
+index ebfdf3649..0a83b1892 100644
+--- a/subsys/bluetooth/controller/ll_sw/nordic/lll/lll.c
++++ b/subsys/bluetooth/controller/ll_sw/nordic/lll/lll.c
+@@ -31,7 +31,21 @@
+ #include "lll.h"
+ #include "lll_vendor.h"
+ #include "lll_clock.h"
++#include <zephyr/linker/section_tags.h>
++#include <zephyr/kernel.h>
+ #include "lll_internal.h"
++#include "hal/cpu.h"   /* Arca: prerequisite of lll_conn.h */
++#include "hal/radio_df.h"   /* Arca: prerequisite of lll_conn.h */
++#include "util/util.h"   /* Arca: prerequisite of lll_conn.h */
++#include "util/mfifo.h"   /* Arca: prerequisite of lll_conn.h */
++#include "util/dbuf.h"   /* Arca: prerequisite of lll_conn.h */
++#include "pdu_df.h"   /* Arca: prerequisite of lll_conn.h */
++#include "pdu_vendor.h"   /* Arca: prerequisite of lll_conn.h */
++#include "pdu.h"   /* Arca: prerequisite of lll_conn.h */
++#include "lll_df_types.h"   /* Arca: prerequisite of lll_conn.h */
++#include "lll_df.h"   /* Arca: prerequisite of lll_conn.h */
++#include "lll_conn.h"                 /* Arca: stale-prepare bookkeeping (arca_lll_flush_stale) */
++#include <zephyr/bluetooth/hci_types.h> /* Arca: BT_HCI_ROLE_PERIPHERAL */
+ #include "lll_prof_internal.h"
+ 
+ #include "hal/debug.h"
+@@ -73,6 +87,9 @@ static inline bool is_done_sync(void);
+ static inline struct lll_event *prepare_dequeue_iter_ready_get(uint8_t *idx);
+ static inline struct lll_event *resume_enqueue(lll_prepare_cb_t resume_cb);
+ static void isr_race(void *param);
++static uint32_t arca_abort_ticks;   /* Arca recorder: see arca_lll_recover() below */
++static uint16_t arca_abort_count;
++static void arca_lll_phase_done(void);
+ 
+ #if !defined(CONFIG_BT_CTLR_LOW_LAT)
+ static uint32_t preempt_ticker_start(struct lll_event *first,
+@@ -295,6 +312,9 @@ int lll_init(void)
+ #endif
+ #endif /* !CONFIG_BT_CTLR_DYNAMIC_INTERRUPTS */
+ 
++	/* Enable Radio interrupt on radio state disabled; after tx or rx or explicitly disabled */
++	nrf_radio_int_enable(NRF_RADIO, HAL_RADIO_INTENSET_DISABLED_Msk);
++
+ 	/* Enable IRQs */
+ 	irq_enable(HAL_RADIO_IRQn);
+ 	irq_enable(HAL_RTC_IRQn);
+@@ -442,6 +462,8 @@ void lll_disable(void *param)
+ 	/* LLL disable of current event, done is generated */
+ 	if (!param || (param == event.curr.param)) {
+ 		if (event.curr.abort_cb && event.curr.param) {
++			arca_abort_ticks = ticker_ticks_now_get();
++			arca_abort_count++;
+ 			event.curr.abort_cb(NULL, event.curr.param);
+ 		} else {
+ 			LL_ASSERT(!param);
+@@ -509,6 +531,7 @@ int lll_done(void *param)
+ 		/* Reset current event instance */
+ 		LL_ASSERT(event.curr.abort_cb);
+ 		event.curr.abort_cb = NULL;
++		arca_lll_phase_done();   /* Arca breadcrumb (defined below the recorder) */
+ 
+ 		param = event.curr.param;
+ 		event.curr.param = NULL;
+@@ -815,6 +838,277 @@ void lll_isr_early_abort(void *param)
+ 	lll_done(NULL);
+ }
+ 
++/* Arca (2026-09-04): flight recorder for the prepare-pipeline overflow (LL_ASSERT(next) in
++ * lll_prepare_resolve). Filled in ISR context right before the assert, survives the reset in
++ * noinit RAM, and is rendered on the LCD by zmk-module-arca-lcd at the next boot.
++ * Keep this layout in sync with zmk-module-arca-lcd/include/arca_lcd/arca_lll_dump.h */
++#define ARCA_LLL_DUMP_MAGIC 0xA5C0DE05U
++#define ARCA_LLL_DUMP_N 12
++struct arca_lll_dump {
++	uint32_t magic;
++	uint32_t ticks_now;
++	uint8_t n;
++	uint8_t enq_resume;
++	uint8_t done_sync;     /* is_done_sync() at capture: 0 = ULL has not consumed the last done */
++	uint8_t flash;         /* 'E'/'W' = flash erase/write in flight at capture, '-' = none */
++	int32_t cur_age;       /* ticks since event.curr was started (24-bit diff) */
++	uint32_t flash_ago_ms; /* ms since the last flash op finished */
++	uint32_t flash_ops;    /* flash ops since boot */
++	uint32_t flash_last_dur_ms; /* duration of the last flash op */
++	uint8_t flash_last_type;    /* 'E'/'W' of the last flash op */
++	uint8_t radio_state;        /* NRF_RADIO->STATE at capture (0=DISABLED 1=RXRU 2=RXIDLE 3=RX 4=RXDIS 9=TXRU 10=TXIDLE 11=TX 12=TXDIS) */
++	uint8_t radio_irq;          /* bit0 RADIO IRQ enabled, bit1 pending, bit2 EVENTS_DISABLED set */
++	uint8_t preempt_err;        /* last preempt(): 'e' no curr, 'r' no ready, '0' keep curr, 'b' -EBUSY, 'c' -ECANCELED, 'a' -EAGAIN, '-' never */
++	uint32_t isr_cb;            /* radio ISR callback address (addr2line it) */
++	int32_t radio_isr_age;      /* ticks since the radio ISR last ran */
++	int32_t preempt_age;        /* ticks since preempt() last ran */
++	int32_t abort_age;          /* ticks since event.curr.abort_cb(NULL) was last called (preempt or lll_disable) */
++	uint16_t abort_count;       /* curr aborts since boot */
++	uint16_t radio_isr_count;   /* radio ISRs since boot (mod 65536) */
++	uint8_t recoveries;         /* recoveries so far this boot (this capture included if recovered) */
++	uint8_t recovered;          /* 1 = overflow recovery, 2 = watchdog recovery followed this capture */
++	uint8_t phase;              /* breadcrumb after the capture: 11 flushed 12 curr completed 13 preempt returned / 21 22 overflow path / 30 a prepare started 31 an event completed (survives reset: tells how far we got) */
++	uint8_t pad[1];
++	char cur[4];
++	char enq[4];
++	char pipe[ARCA_LLL_DUMP_N][4];
++	uint8_t pipe_resume[ARCA_LLL_DUMP_N];
++	uint16_t pipe_lazy[ARCA_LLL_DUMP_N];
++	int32_t pipe_dt[ARCA_LLL_DUMP_N];
++};
++__noinit struct arca_lll_dump arca_lll_dump;
++static uint32_t arca_curr_start_ticks;
++/* Arca (2026-09-07): recovery + more evidence. See arca_lll_recover(). */
++volatile uint32_t arca_lll_recoveries;               /* read by zmk-module-arca-lcd (top bar "R<n>") */
++static uint32_t arca_preempt_ticks;
++static uint8_t arca_preempt_err = '-';
++extern volatile uint32_t arca_radio_isr_ticks;       /* hal/nrf5/radio/radio.c isr_radio() */
++extern volatile uint16_t arca_radio_isr_count;
++void *arca_radio_isr_cb_get(void);
++extern volatile uint32_t nrf_flash_op_in_progress __attribute__((weak));
++extern volatile uint32_t nrf_flash_op_last_end_ms __attribute__((weak));
++extern volatile uint32_t nrf_flash_op_last_start_ms __attribute__((weak));
++extern volatile uint32_t nrf_flash_op_count __attribute__((weak));
++extern volatile uint8_t nrf_flash_op_last_type __attribute__((weak));
++
++void *arca_ull_conn_lll_get(uint16_t handle, uint8_t *role);
++void *arca_ull_adv_lll_get(uint8_t handle);
++void *arca_ull_scan_lll_get(uint8_t handle);
++
++/* C<h> = we are central (split link to R), P<h> = we are peripheral (host link),
++ * A = advertising, S = scanning, - = none, ? = unknown */
++static void arca_role_name(void *param, char out[4])
++{
++	out[0] = '-'; out[1] = 0; out[2] = 0; out[3] = 0;
++	if (!param) {
++		return;
++	}
++	for (uint16_t h = 0; h < CONFIG_BT_MAX_CONN; h++) {
++		uint8_t role = 0;
++		if (arca_ull_conn_lll_get(h, &role) == param) {
++			out[0] = role ? 'P' : 'C'; out[1] = '0' + (h % 10);
++			return;
++		}
++	}
++#if defined(CONFIG_BT_BROADCASTER)
++	for (uint8_t h = 0; h < 4; h++) {
++		if (arca_ull_adv_lll_get(h) == param) { out[0] = 'A'; out[1] = '0' + h; return; }
++	}
++#endif
++#if defined(CONFIG_BT_OBSERVER)
++	for (uint8_t h = 0; h < 4; h++) {
++		if (arca_ull_scan_lll_get(h) == param) { out[0] = 'S'; out[1] = '0' + h; return; }
++	}
++#endif
++	out[0] = '?';
++}
++
++static void arca_lll_capture(struct lll_prepare_param *pp, uint8_t is_resume)
++{
++	uint32_t now = ticker_ticks_now_get();
++	uint8_t idx = UINT8_MAX;
++	uint8_t n = 0;
++	struct lll_event *e;
++
++	arca_lll_dump.magic = 0U;
++	arca_lll_dump.ticks_now = now;
++	arca_role_name(event.curr.param, arca_lll_dump.cur);
++	arca_role_name(pp ? pp->param : NULL, arca_lll_dump.enq);
++	arca_lll_dump.enq_resume = is_resume;
++	arca_lll_dump.done_sync = is_done_sync() ? 1U : 0U;
++	arca_lll_dump.cur_age = event.curr.param ?
++		(int32_t)ticker_ticks_diff_get(now, arca_curr_start_ticks) : 0;
++	if (&nrf_flash_op_in_progress != NULL && nrf_flash_op_in_progress == 0xF1A5E001U) {
++		arca_lll_dump.flash = 'E';
++	} else if (&nrf_flash_op_in_progress != NULL && nrf_flash_op_in_progress == 0xF1A5E002U) {
++		arca_lll_dump.flash = 'W';
++	} else {
++		arca_lll_dump.flash = '-';
++	}
++	arca_lll_dump.flash_ago_ms = (&nrf_flash_op_last_end_ms != NULL) ?
++		(k_uptime_get_32() - nrf_flash_op_last_end_ms) : 0xFFFFFFFFU;
++	arca_lll_dump.flash_ops = (&nrf_flash_op_count != NULL) ? nrf_flash_op_count : 0U;
++	arca_lll_dump.flash_last_dur_ms = (&nrf_flash_op_last_start_ms != NULL) ?
++		(nrf_flash_op_last_end_ms - nrf_flash_op_last_start_ms) : 0U;
++	arca_lll_dump.flash_last_type = (&nrf_flash_op_last_type != NULL) ? nrf_flash_op_last_type : '?';
++	arca_lll_dump.radio_state = (uint8_t)NRF_RADIO->STATE;
++	arca_lll_dump.radio_irq = (NVIC_GetEnableIRQ(RADIO_IRQn) ? 1U : 0U) |
++				  (NVIC_GetPendingIRQ(RADIO_IRQn) ? 2U : 0U) |
++				  (NRF_RADIO->EVENTS_DISABLED ? 4U : 0U);
++	arca_lll_dump.preempt_err = arca_preempt_err;
++	arca_lll_dump.isr_cb = (uint32_t)arca_radio_isr_cb_get();
++	arca_lll_dump.radio_isr_age = (int32_t)ticker_ticks_diff_get(now, arca_radio_isr_ticks);
++	arca_lll_dump.preempt_age = (int32_t)ticker_ticks_diff_get(now, arca_preempt_ticks);
++	arca_lll_dump.abort_age = (int32_t)ticker_ticks_diff_get(now, arca_abort_ticks);
++	arca_lll_dump.abort_count = arca_abort_count;
++	arca_lll_dump.radio_isr_count = arca_radio_isr_count;
++	arca_lll_dump.recoveries = (uint8_t)arca_lll_recoveries;
++	arca_lll_dump.recovered = 0U;
++	while ((e = ull_prepare_dequeue_iter(&idx)) && n < ARCA_LLL_DUMP_N) {
++		arca_role_name(e->prepare_param.param, arca_lll_dump.pipe[n]);
++		arca_lll_dump.pipe_resume[n] = e->is_resume;
++		arca_lll_dump.pipe_lazy[n] = e->prepare_param.lazy;
++		arca_lll_dump.pipe_dt[n] = (int32_t)ticker_ticks_diff_get(e->prepare_param.ticks_at_expire, now);
++		n++;
++	}
++	arca_lll_dump.n = n;
++	arca_lll_dump.magic = ARCA_LLL_DUMP_MAGIC;
++}
++
++/* Arca (2026-09-07): the pipeline overflow is a *symptom*. Two dumps (v3/v4) showed the same thing:
++ * the current event (C1 = split link) never completes — radio DISABLED, no radio IRQ for 245 ms,
++ * armed ISR = lll_conn_isr_rx (its RX phase silently died; no flash op involved) — and every 7.5 ms
++ * the next prepare of the *same* connection is refused by is_abort_cb (-EBUSY: no trx yet), so nobody
++ * ever aborts it; 47 prepares (3 per 15 ms) pile up and LL_ASSERT(next) resets the SoC.
++ * Deepening the pipeline only delays the assert. Two nets instead:
++ *   (a) arca_lll_watchdog(): from preempt(), a current event older than ARCA_STUCK_EVENT_US whose radio
++ *       sits DISABLED with no IRQ pending/no DISABLED event is completed synchronously (its interrupt is
++ *       never coming). Stale prepares are flushed first so the dequeue does not run a hopelessly late one.
++ *   (b) arca_lll_recover(): if the pipeline still overflows, flush stale prepares, complete the stuck
++ *       event (if any), then re-resolve this prepare (curr is free and the pipeline empty -> it runs).
++ * The first attempt of (b) crashed on LL_ASSERT_OVERHEAD when the dequeue ran a 240 ms-late prepare;
++ * hence the flush, and CONFIG_BT_CTLR_ASSERT_OVERHEAD_START=n in the Arca .conf files. */
++#define ARCA_STUCK_EVENT_US   40000U /* no legitimate event outlives its 7.5/15 ms interval by this much with the radio idle */
++#define ARCA_STALE_PREPARE_US 3000U  /* a prepare whose expiry passed more than this ago would only fail its overhead check */
++
++static uint8_t arca_in_recovery;
++
++static void arca_lll_phase_done(void)
++{
++	if (arca_lll_recoveries && arca_lll_dump.phase >= 30U) {
++		arca_lll_dump.phase = 31U;   /* an event completed normally after a recovery */
++	}
++}
++
++/* Post the done-extra so ULL sees an *aborted* conn event (supervision/latency bookkeeping stays right). */
++static void arca_conn_done_extra(void *param)
++{
++	char role[4];
++
++	arca_role_name(param, role);
++	if (role[0] == 'C' || role[0] == 'P') {
++		struct event_done_extra *e = ull_event_done_extra_get();
++
++		if (e) {
++			e->type = EVENT_DONE_EXTRA_TYPE_CONN;
++			e->trx_cnt = 0U;
++			e->crc_valid = 0U;
++			e->is_aborted = 1U;
++#if defined(CONFIG_BT_CTLR_LE_ENC)
++			e->mic_state = 0U; /* LLL_CONN_MIC_NONE */
++#endif /* CONFIG_BT_CTLR_LE_ENC */
++		}
++	}
++}
++
++/* Mark stale prepares aborted with the bookkeeping their abort_cb would have done, but without posting
++ * a done per entry (the done pool holds ~8, a flooded pipeline 47). ull_prepare_dequeue() drops aborted
++ * entries silently; the next real event catches the event counter up through latency_prepare. */
++static uint8_t arca_lll_flush_stale(uint32_t now)
++{
++	uint8_t idx = UINT8_MAX;
++	uint8_t n = 0U;
++	struct lll_event *e;
++
++	while ((e = ull_prepare_dequeue_iter(&idx))) {
++		struct lll_prepare_param *pp = &e->prepare_param;
++		uint32_t late;
++		char role[4];
++
++		if (e->is_aborted) {
++			continue;
++		}
++		late = ticker_ticks_diff_get(now, pp->ticks_at_expire);
++		if ((late & BIT(HAL_TICKER_CNTR_MSBIT)) ||           /* expiry still ahead */
++		    (late < HAL_TICKER_US_TO_TICKS(ARCA_STALE_PREPARE_US))) {
++			continue;
++		}
++		e->is_aborted = 1U;
++		arca_role_name(pp->param, role);
++		if (role[0] == 'C' || role[0] == 'P') {           /* what lll_conn_abort_cb(prepare_param) does */
++			struct lll_conn *lll = pp->param;
++
++			lll->lazy_prepare = pp->lazy;
++			lll->latency_prepare += (pp->lazy + 1U);
++#if defined(CONFIG_BT_PERIPHERAL)
++			if (lll->role == BT_HCI_ROLE_PERIPHERAL) {
++				lll->periph.window_widening_prepare_us +=
++					lll->periph.window_widening_periodic_us * (pp->lazy + 1U);
++				if (lll->periph.window_widening_prepare_us >
++				    lll->periph.window_widening_max_us) {
++					lll->periph.window_widening_prepare_us =
++						lll->periph.window_widening_max_us;
++				}
++			}
++#endif /* CONFIG_BT_PERIPHERAL */
++		}
++		(void)lll_hfclock_off();                          /* the ref its lll_*_prepare() took */
++		n++;
++	}
++
++	return n;
++}
++
++/* Complete a current event that will never complete on its own (its radio interrupt is not coming).
++ * how: 1 = pipeline overflow path, 2 = watchdog in preempt(). */
++static void arca_lll_complete_curr(uint8_t how)
++{
++	if (!event.curr.abort_cb || !event.curr.param) {
++		return;
++	}
++	arca_conn_done_extra(event.curr.param);
++	/* isr = isr_race, radio_disable if busy, tmr stop, hfclock off, lll_done(NULL) -> ull_prepare_dequeue */
++	lll_isr_cleanup(event.curr.param);
++	arca_lll_recoveries++;
++	arca_lll_dump.recoveries = (uint8_t)arca_lll_recoveries;
++	arca_lll_dump.recovered = how;
++}
++
++static bool arca_lll_curr_is_dead(uint32_t now)
++{
++	if (!event.curr.abort_cb || !event.curr.param) {
++		return false;
++	}
++	if (ticker_ticks_diff_get(now, arca_curr_start_ticks) <
++	    HAL_TICKER_US_TO_TICKS(ARCA_STUCK_EVENT_US)) {
++		return false;
++	}
++	return radio_is_idle() && !NVIC_GetPendingIRQ(RADIO_IRQn) && !NRF_RADIO->EVENTS_DISABLED;
++}
++
++/* (b) pipeline overflow: make room, then let the caller re-resolve this prepare. */
++static void arca_lll_recover(void)
++{
++	uint32_t now = ticker_ticks_now_get();
++
++	(void)arca_lll_flush_stale(now);
++	if (event.curr.abort_cb && event.curr.param) {
++		arca_lll_complete_curr(1U);
++	} else {
++		ull_prepare_dequeue(TICKER_USER_ID_LLL);      /* drop the flushed entries, resume fresh ones */
++	}
++}
++
+ int lll_prepare_resolve(lll_is_abort_cb_t is_abort_cb, lll_abort_cb_t abort_cb,
+ 			lll_prepare_cb_t prepare_cb,
+ 			struct lll_prepare_param *prepare_param,
+@@ -888,6 +1182,18 @@ int lll_prepare_resolve(lll_is_abort_cb_t is_abort_cb, lll_abort_cb_t abort_cb,
+ 		/* Store the next prepare for deferred call */
+ 		next = ull_prepare_enqueue(is_abort_cb, abort_cb, prepare_param,
+ 					   prepare_cb, is_resume);
++		if (!next && !arca_in_recovery) {
++			arca_lll_capture(prepare_param, is_resume);
++			arca_in_recovery = 1U;
++			arca_lll_recover();
++			arca_lll_dump.phase = 21U;
++			/* curr is free and the stale entries are gone: resolve again (runs it, or enqueues it) */
++			err = lll_prepare_resolve(is_abort_cb, abort_cb, prepare_cb, prepare_param,
++						  is_resume, is_dequeue);
++			arca_in_recovery = 0U;
++			arca_lll_dump.phase = 22U;
++			return err;
++		}
+ 		LL_ASSERT(next);
+ 
+ #if !defined(CONFIG_BT_CTLR_LOW_LAT)
+@@ -946,6 +1252,10 @@ int lll_prepare_resolve(lll_is_abort_cb_t is_abort_cb, lll_abort_cb_t abort_cb,
+ 	LL_ASSERT(!ready || &ready->prepare_param == prepare_param);
+ 
+ 	event.curr.param = prepare_param->param;
++	arca_curr_start_ticks = ticker_ticks_now_get();
++	if (arca_lll_recoveries) {
++		arca_lll_dump.phase = 30U;
++	}
+ 	event.curr.is_abort_cb = is_abort_cb;
+ 	event.curr.abort_cb = abort_cb;
+ 
+@@ -1210,10 +1520,26 @@ static void preempt(void *param)
+ 	uint8_t idx;
+ 	int err;
+ 
++	arca_preempt_ticks = ticker_ticks_now_get();
++	arca_preempt_err = 'e';
++
++	/* (a) Arca watchdog: a current event whose radio interrupt is never coming (see arca_lll_recover) */
++	if (arca_lll_curr_is_dead(arca_preempt_ticks)) {
++		arca_lll_capture(NULL, 0U);
++		(void)arca_lll_flush_stale(arca_preempt_ticks);
++		arca_lll_dump.phase = 11U;
++		arca_lll_complete_curr(2U);   /* lll_done(NULL) -> ull_prepare_dequeue runs the fresh preemptor */
++		arca_lll_dump.phase = 12U;
++		arca_preempt_err = 'w';
++		arca_lll_dump.phase = 13U;
++		return;
++	}
++
+ 	/* No event to abort */
+ 	if (!event.curr.abort_cb || !event.curr.param) {
+ 		return;
+ 	}
++	arca_preempt_err = 'r';
+ 
+ preempt_find_preemptor:
+ 	/* Find a prepare that is ready and not a resume */
+@@ -1311,6 +1637,7 @@ preempt_find_preemptor:
+ 
+ 	/* Check if current event want to continue */
+ 	err = event.curr.is_abort_cb(ready->prepare_param.param, event.curr.param, &resume_cb);
++	arca_preempt_err = (err == 0) ? '0' : (err == -EBUSY) ? 'b' : (err == -ECANCELED) ? 'c' : (err == -EAGAIN) ? 'a' : '?';
+ 	if (!err || (err == -EBUSY)) {
+ 		/* Returns -EBUSY when same curr and next state/role, do not
+ 		 * abort same curr and next event.
+@@ -1325,6 +1652,8 @@ preempt_find_preemptor:
+ 	}
+ 
+ 	/* Abort the current event */
++	arca_abort_ticks = ticker_ticks_now_get();
++	arca_abort_count++;
+ 	event.curr.abort_cb(NULL, event.curr.param);
+ 
+ 	/* Check if resume requested */
+diff --git a/subsys/bluetooth/controller/ll_sw/ull.c b/subsys/bluetooth/controller/ll_sw/ull.c
+index 41df97a29..c1c56d5b5 100644
+--- a/subsys/bluetooth/controller/ll_sw/ull.c
++++ b/subsys/bluetooth/controller/ll_sw/ull.c
+@@ -371,12 +371,12 @@ static MFIFO_DEFINE(prep, sizeof(struct lll_event), EVENT_PIPELINE_MAX);
+ #if !defined(VENDOR_EVENT_DONE_MAX)
+ #if defined(CONFIG_BT_CTLR_ADV_EXT) && defined(CONFIG_BT_OBSERVER)
+ #if defined(CONFIG_BT_CTLR_PHY_CODED)
+-#define EVENT_DONE_MAX 6
++#define EVENT_DONE_MAX (6U + EVENT_DEFER_MAX)
+ #else /* !CONFIG_BT_CTLR_PHY_CODED */
+-#define EVENT_DONE_MAX 5
++#define EVENT_DONE_MAX (5U + EVENT_DEFER_MAX)
+ #endif /* !CONFIG_BT_CTLR_PHY_CODED */
+ #else /* !CONFIG_BT_CTLR_ADV_EXT || !CONFIG_BT_OBSERVER */
+-#define EVENT_DONE_MAX 4
++#define EVENT_DONE_MAX (4U + EVENT_DEFER_MAX)
+ #endif /* !CONFIG_BT_CTLR_ADV_EXT || !CONFIG_BT_OBSERVER */
+ #else
+ #define EVENT_DONE_MAX VENDOR_EVENT_DONE_MAX
+diff --git a/subsys/bluetooth/controller/ll_sw/ull_adv.c b/subsys/bluetooth/controller/ll_sw/ull_adv.c
+index 19712c8b8..28a009386 100644
+--- a/subsys/bluetooth/controller/ll_sw/ull_adv.c
++++ b/subsys/bluetooth/controller/ll_sw/ull_adv.c
+@@ -3146,3 +3146,11 @@ static void init_set(struct ll_adv_set *adv)
+ 	init_pdu(lll_adv_scan_rsp_peek(&ll_adv[0].lll), PDU_ADV_TYPE_SCAN_RSP);
+ #endif /* !CONFIG_BT_CTLR_ADV_EXT */
+ }
++
++/* Arca diagnostics */
++void *arca_ull_adv_lll_get(uint8_t handle)
++{
++	struct ll_adv_set *adv = ull_adv_set_get(handle);
++
++	return adv ? (void *)&adv->lll : NULL;
++}
+diff --git a/subsys/bluetooth/controller/ll_sw/ull_conn.c b/subsys/bluetooth/controller/ll_sw/ull_conn.c
+index 25fecab22..278fd1200 100644
+--- a/subsys/bluetooth/controller/ll_sw/ull_conn.c
++++ b/subsys/bluetooth/controller/ll_sw/ull_conn.c
+@@ -2884,3 +2884,15 @@ uint8_t ull_is_lll_tx_queue_empty(struct ll_conn *conn)
+ {
+ 	return (memq_peek(conn->lll.memq_tx.head, conn->lll.memq_tx.tail, NULL) == NULL);
+ }
++
++/* Arca diagnostics: lll pointer + role of a connection slot (see lll.c arca_lll_capture) */
++void *arca_ull_conn_lll_get(uint16_t handle, uint8_t *role)
++{
++	struct ll_conn *conn = ll_conn_get(handle);
++
++	if (!conn) {
++		return NULL;
++	}
++	*role = conn->lll.role;
++	return &conn->lll;
++}
+diff --git a/subsys/bluetooth/controller/ll_sw/ull_scan.c b/subsys/bluetooth/controller/ll_sw/ull_scan.c
+index a1d90d3cc..bfb816e08 100644
+--- a/subsys/bluetooth/controller/ll_sw/ull_scan.c
++++ b/subsys/bluetooth/controller/ll_sw/ull_scan.c
+@@ -1213,3 +1213,11 @@ static uint8_t disable(uint8_t handle)
+ 
+ 	return 0;
+ }
++
++/* Arca diagnostics */
++void *arca_ull_scan_lll_get(uint8_t handle)
++{
++	struct ll_scan_set *scan = ull_scan_set_get(handle);
++
++	return scan ? (void *)&scan->lll : NULL;
++}

@@ -1,0 +1,50 @@
+# Arca rev.2（v5）の OLED（SSD1306 128×32・縦置き＝32×128・北が上）の自前画面 / 2026-11-02
+#   台帳 11-02: 「北が上」「B（レイヤ名を Arc で縦に積む）」「①（電池の大きい円 1 つ）」「R の円の中はロゴ（新しい a）」
+config ARCA_OLED
+    bool "Arca rev.2 の縦の OLED 画面"
+    depends on ZMK_DISPLAY
+    select LV_USE_CANVAS
+    help
+      L＝電池の円（中に BT の番号・USB は U・USB 給電中は USB の印）＋レイヤ名（Arc の縦積み）＋修飾キーの □ 4 つ。
+      R＝電池の円（中に舟のマーク・L と切れている間は網点）＋ ARCA。
+      絵の素は chat-files/ark_oled_assets.py が図の生成器から書き出す（C の描画＝図を照合済み）。
+
+if ARCA_OLED
+
+config ARCA_OLED_POLL_MS
+    int "状態を読み直す間隔（ms）"
+    default 50
+    help
+      ZMK には修飾キーの変化のイベントが無い（押した瞬間はまだ未登録＝rev3 §8.3）。
+      表示スレッドの上で読み直し、変わった時だけ描き直す（変わらなければ I2C に何も流さない）。
+
+config ARCA_OLED_INK_BLACK
+    bool "LVGL の黒＝光る（DT の inversion-on と組）"
+    default y
+    help
+      組み込み画面（テーマ mono・白地に黒字）が OLED で「黒地に光る字」に見えている＝LVGL の黒が光る。
+      逆に出たら n にする。
+
+config ARCA_OLED_ROT180
+    bool "縦の画面を 180° 回す"
+    default n
+    help
+      既定＝組み込み画面が「東を下にすると読める」向き（ユーザー 11-02）から決めた写し方
+      （横の x 0→127 が南→北・y 0→31 が西→東）。上下が逆に出たら y。
+
+config ARCA_OLED_FONT_JURA
+    bool "レイヤ名の字を Jura にする（Arc の字のデータがあっても）"
+    default n
+    help
+      11-16: 公開用に Jura（OFL）を足した。src/oled_font_arc.h（Arc＝eula で改変・再配布禁止＝手元専用）が
+      あればそれ、無ければ Jura を使う（oled_assets.h の __has_include）。手元でも Jura にしたいときだけ y。
+
+config ARCA_OLED_JUMP_LAYER
+    int "Jump レイヤの番号（L だけ・-1＝使わない）"
+    default -1
+    help
+      11-09 ユーザー「OLEDでJump用になってるかどうかわかるようにできる？右のロゴ部分変えて」。
+      このレイヤが点いている間、L が R へ知らせ、R の円の中を舟のマークから J に替える。
+      番号は arca_v5.keymap の #define JUMP と同じにする（ark_fw_v5_check.py が照合）。
+
+endif

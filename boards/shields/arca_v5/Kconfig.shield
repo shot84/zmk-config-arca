@@ -1,0 +1,5 @@
+config SHIELD_ARCA_V5_LEFT
+	def_bool $(shields_list_contains,arca_v5_left)
+
+config SHIELD_ARCA_V5_RIGHT
+	def_bool $(shields_list_contains,arca_v5_right)
